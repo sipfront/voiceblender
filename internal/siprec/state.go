@@ -85,9 +85,10 @@ type State struct {
 // NewState returns an empty recording session state.
 func NewState() *State {
 	return &State{
-		participants: make(map[string]ParticipantInfo),
-		streams:      make(map[string]StreamInfo),
-		sender:       make(map[string]string),
+		participants:    make(map[string]ParticipantInfo),
+		streams:         make(map[string]StreamInfo),
+		sender:          make(map[string]string),
+		senderConflicts: make(map[string][]string),
 	}
 }
 
@@ -109,6 +110,10 @@ func (s *State) Apply(r *Recording) Delta {
 		s.participants = make(map[string]ParticipantInfo, len(r.Participants))
 		s.streams = make(map[string]StreamInfo, len(r.Streams))
 		s.sender = make(map[string]string, len(r.Streams))
+		s.senderConflicts = make(map[string][]string)
+	}
+	if s.senderConflicts == nil {
+		s.senderConflicts = make(map[string][]string)
 	}
 	s.dataMode = r.DataMode
 
@@ -149,7 +154,10 @@ func (s *State) Apply(r *Recording) Delta {
 		}
 	}
 
-	conflicts := make(map[string][]string)
+	// claimed tracks the streams this document speaks for. A conflict is only
+	// meaningful within one document, and only a document that speaks for a
+	// stream again can resolve one — a partial update that says nothing about a
+	// stream leaves its conflict standing.
 	claimed := make(map[string]string)
 	for _, psa := range r.ParticipantStreams {
 		for _, streamID := range psa.Send {
@@ -159,19 +167,22 @@ func (s *State) Apply(r *Recording) Delta {
 			if psa.DisassociateTime != "" {
 				delete(s.sender, streamID)
 				delete(s.streams, streamID)
+				delete(s.senderConflicts, streamID)
 				continue
 			}
-			// Two participants claiming one stream in the same document is a
-			// defect the sender map cannot hold, so it is recorded separately.
-			if prev, seen := claimed[streamID]; seen && prev != psa.ParticipantID {
-				conflicts[streamID] = append(conflicts[streamID], psa.ParticipantID)
+			if prev, seen := claimed[streamID]; seen {
+				// Two participants claiming one stream in the same document is
+				// a defect the sender map cannot hold, so it is kept separately.
+				if prev != psa.ParticipantID {
+					s.senderConflicts[streamID] = append(s.senderConflicts[streamID], psa.ParticipantID)
+				}
 				continue
 			}
+			delete(s.senderConflicts, streamID)
 			claimed[streamID] = psa.ParticipantID
 			s.sender[streamID] = psa.ParticipantID
 		}
 	}
-	s.senderConflicts = conflicts
 
 	// A participant that left the session is dropped along with the streams it
 	// was sending — those m= sections stop carrying anyone's audio.
@@ -184,6 +195,21 @@ func (s *State) Apply(r *Recording) Delta {
 			if pid == psa.ParticipantID {
 				delete(s.sender, streamID)
 				delete(s.streams, streamID)
+				delete(s.senderConflicts, streamID)
+			}
+		}
+		// A party that has left no longer contests anything.
+		for streamID, others := range s.senderConflicts {
+			kept := others[:0]
+			for _, pid := range others {
+				if pid != psa.ParticipantID {
+					kept = append(kept, pid)
+				}
+			}
+			if len(kept) == 0 {
+				delete(s.senderConflicts, streamID)
+			} else {
+				s.senderConflicts[streamID] = kept
 			}
 		}
 	}
