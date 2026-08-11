@@ -108,23 +108,29 @@ func sttOptions(req STTRequest) (stt.Options, error) {
 // leg. It returns a copy rather than mutating, because a room shares a single
 // Options template across its legs and binding in place would route every
 // leg's transcripts to whichever leg started last.
-func (s *Server) attachSTTSinks(opts stt.Options, scope events.LegRoomScope) stt.Options {
+// streamID names the leg's audio stream being transcribed, empty for a leg
+// whose audio is the call itself. A recording session has one transcriber per
+// stream, and every event has to say which one it came from or the two parties
+// arrive indistinguishable.
+func (s *Server) attachSTTSinks(opts stt.Options, scope events.LegRoomScope, streamID string) stt.Options {
 	bus := s.Bus
 	legID := scope.LegID
 	opts.OnTranscript = func(ev stt.TranscriptEvent) {
-		s.Log.Info("stt callback fired", "leg_id", legID, "is_final", ev.IsFinal, "text_len", len(ev.Text))
-		s.Log.Debug("stt callback text", "leg_id", legID, "is_final", ev.IsFinal, "text", ev.Text)
+		s.Log.Info("stt callback fired", "leg_id", legID, "stream_id", streamID, "is_final", ev.IsFinal, "text_len", len(ev.Text))
+		s.Log.Debug("stt callback text", "leg_id", legID, "stream_id", streamID, "is_final", ev.IsFinal, "text", ev.Text)
 		bus.Publish(events.STTText, &events.STTTextData{
 			LegRoomScope: scope,
+			StreamID:     streamID,
 			Text:         ev.Text,
 			IsFinal:      ev.IsFinal,
 			SpeechFinal:  ev.SpeechFinal,
 		})
 	}
 	opts.OnTurn = func(ev stt.TurnEvent) {
-		s.Log.Debug("stt turn event", "leg_id", legID, "event", ev.Event, "turn_index", ev.TurnIndex)
+		s.Log.Debug("stt turn event", "leg_id", legID, "stream_id", streamID, "event", ev.Event, "turn_index", ev.TurnIndex)
 		bus.Publish(events.STTTurn, &events.STTTurnData{
 			LegRoomScope:        scope,
+			StreamID:            streamID,
 			Event:               ev.Event,
 			TurnIndex:           ev.TurnIndex,
 			Text:                ev.Transcript,
@@ -183,6 +189,16 @@ func (s *Server) doStartSTTLeg(legID string, req STTRequest) (*STTStartLegResult
 	if l.State() != leg.StateConnected {
 		return nil, newAPIError(http.StatusConflict, "leg not connected")
 	}
+	// A leg whose m-line 0 is just another party's audio has no "the call" to
+	// transcribe, and the fallback below would be actively harmful: AudioReader
+	// is a second reader over the same frame channel the mixer participant for
+	// that stream is already draining, so the transcriber and the mixer would
+	// each get half the frames — a garbled transcript AND a damaged recording.
+	// Its room is the right scope, one transcriber per stream.
+	if si, ok := l.(interface{ StreamsIndependent() bool }); ok && si.StreamsIndependent() {
+		return nil, newAPIError(http.StatusConflict,
+			"this leg's audio is per-stream; start STT on its room instead")
+	}
 
 	legTranscribers.Lock()
 	if _, exists := legTranscribers.m[id]; exists {
@@ -218,7 +234,7 @@ func (s *Server) doStartSTTLeg(legID string, req STTRequest) (*STTStartLegResult
 		reader = mixer.NewResampleReader(ar, l.SampleRate(), mixer.DefaultSampleRate)
 	}
 
-	opts = s.attachSTTSinks(opts, events.LegRoomScope{LegID: id, AppID: l.AppID()})
+	opts = s.attachSTTSinks(opts, events.LegRoomScope{LegID: id, AppID: l.AppID()}, "")
 	inRoom := l.RoomID() != ""
 	s.Log.Info("stt starting transcriber", "leg_id", id, "in_room", inRoom, "sample_rate", l.SampleRate(), "language", opts.Language, "partial", opts.Partial, "provider", providerName)
 
@@ -344,8 +360,33 @@ func (s *Server) doStartSTTRoom(roomID string, req STTRequest) (*STTStartRoomRes
 	if !ok {
 		return nil, newAPIError(http.StatusNotFound, "room not found")
 	}
-	parts := rm.Participants()
-	if len(parts) == 0 {
+	// A room holds two kinds of audio source and both have to be transcribed.
+	// Legs are the ordinary case. Streams are the case that matters for
+	// recording: a SIPREC session's m= sections are other parties' audio, so the
+	// room holds one stream participant per party and NO leg participant at all
+	// — Participants() alone answered "room has no participants" on a perfectly
+	// good recording session, which is the one place per-speaker transcription
+	// is the entire point.
+	type sttSource struct {
+		participantID string
+		streamID      string
+		l             leg.Leg
+	}
+	var sources []sttSource
+	for _, l := range rm.Participants() {
+		sources = append(sources, sttSource{participantID: l.ID(), l: l})
+	}
+	for _, sp := range rm.StreamParticipants() {
+		l, ok := s.LegMgr.Get(sp.LegID)
+		if !ok {
+			// The stream outlived its leg; nothing to hang a context on.
+			s.Log.Warn("room stt: stream participant has no leg", "room_id", id,
+				"participant_id", sp.ParticipantID, "leg_id", sp.LegID)
+			continue
+		}
+		sources = append(sources, sttSource{participantID: sp.ParticipantID, streamID: sp.StreamID, l: l})
+	}
+	if len(sources) == 0 {
 		return nil, newAPIError(http.StatusConflict, "room has no participants")
 	}
 
@@ -363,11 +404,10 @@ func (s *Server) doStartSTTRoom(roomID string, req STTRequest) (*STTStartRoomRes
 	roomTranscribers.m[id] = state
 	roomTranscribers.Unlock()
 
-	legIDs := make([]string, 0, len(parts))
-	for _, l := range parts {
-		legID := l.ID()
-		legIDs = append(legIDs, legID)
-		s.startRoomLegSTT(id, legID, l, rm.Mixer(), state)
+	legIDs := make([]string, 0, len(sources))
+	for _, src := range sources {
+		legIDs = append(legIDs, src.participantID)
+		s.startRoomLegSTT(id, src.participantID, src.streamID, src.l, rm.Mixer(), state)
 	}
 	return &STTStartRoomResult{Status: "stt_started", RoomID: id, LegIDs: legIDs}, nil
 }
@@ -384,30 +424,37 @@ func (s *Server) sttRoom(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// startRoomLegSTT spins up a transcriber for a single leg within a room STT session.
+// startRoomLegSTT spins up a transcriber for one audio source within a room STT
+// session. participantID is the mixer's key — a leg ID for an ordinary
+// participant, "legID#streamID" for one of a leg's streams — and is what the tap
+// and the transcriber map are keyed by, so a leg contributing several streams
+// gets one transcriber each. streamID is empty for an ordinary participant.
 // Caller must ensure state is in roomTranscribers.m[roomID].
-func (s *Server) startRoomLegSTT(roomID, legID string, l leg.Leg, mix *mixer.Mixer, state *roomSTTState) {
+func (s *Server) startRoomLegSTT(roomID, participantID, streamID string, l leg.Leg, mix *mixer.Mixer, state *roomSTTState) {
 	pr, pw := createPipe()
-	mix.SetParticipantTap(legID, pw)
+	// A tap is a COPY of the participant's frames, which is what makes this safe
+	// next to recording and the mixer: reading a stream's io.Reader directly
+	// would take frames away from whoever else is draining it.
+	mix.SetParticipantTap(participantID, pw)
 	sttReader := io.Reader(mixer.NewResampleReader(pr, mix.SampleRate(), mixer.DefaultSampleRate))
 
 	transcriber := s.newSTTProvider(state.provider)
 	roomTranscribers.Lock()
-	state.transcribers[legID] = transcriber
+	state.transcribers[participantID] = transcriber
 	roomTranscribers.Unlock()
 
 	apiKey := state.apiKey
-	opts := s.attachSTTSinks(state.opts, events.LegRoomScope{LegID: legID, RoomID: roomID, AppID: l.AppID()})
+	opts := s.attachSTTSinks(state.opts, events.LegRoomScope{LegID: l.ID(), RoomID: roomID, AppID: l.AppID()}, streamID)
 
 	go func() {
 		_ = transcriber.Start(l.Context(), sttReader, apiKey, opts, nil)
 		// Cleanup on exit.
 		if rm, ok := s.RoomMgr.Get(roomID); ok {
-			rm.Mixer().ClearParticipantTap(legID)
+			rm.Mixer().ClearParticipantTap(participantID)
 		}
 		roomTranscribers.Lock()
 		if st, ok := roomTranscribers.m[roomID]; ok {
-			delete(st.transcribers, legID)
+			delete(st.transcribers, participantID)
 			if len(st.transcribers) == 0 {
 				delete(roomTranscribers.m, roomID)
 			}
@@ -443,7 +490,7 @@ func (s *Server) onLegJoinedRoom(roomID, legID string) {
 	}
 
 	s.Log.Info("stt auto-starting for new leg in room", "room_id", roomID, "leg_id", legID)
-	s.startRoomLegSTT(roomID, legID, l, rm.Mixer(), state)
+	s.startRoomLegSTT(roomID, legID, "", l, rm.Mixer(), state)
 }
 
 func (s *Server) doStopSTTRoom(roomID string) (*STTStopResult, error) {
