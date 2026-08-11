@@ -68,6 +68,14 @@ type Participant struct {
 	// so closing it here would silence the live successor.
 	ownerClosesEgress atomic.Bool
 
+	// framesRead counts frames taken from Reader, and starved counts mix
+	// intervals where nothing was queued and silence was substituted. Together
+	// they distinguish a participant that has gone quiet from one whose source
+	// has stopped, which is otherwise invisible: both look like silence to
+	// everything downstream.
+	framesRead atomic.Uint64
+	starved    atomic.Uint64
+
 	// Muted prevents this participant's audio from contributing to the mix
 	// and suppresses speaking events. Lock-free via atomic.
 	Muted atomic.Bool
@@ -649,8 +657,20 @@ func (m *Mixer) readLoop(p *Participant, stopCh <-chan struct{}) {
 
 		n, err := p.Reader.Read(buf)
 		if err != nil {
+			// A participant that stops reading contributes silence for the rest
+			// of the call: the mix loop substitutes a silent frame when nothing
+			// is queued, and the per-participant tap receives that silence too.
+			// Recording and transcription therefore keep running on a source
+			// that has gone away, with nothing to say so — log it.
+			select {
+			case <-p.done:
+			default:
+				m.log.Warn("mixer: participant read loop stopped, it now contributes silence",
+					"participant_id", p.ID, "error", err, "frames_read", p.framesRead.Load())
+			}
 			return
 		}
+		p.framesRead.Add(1)
 		frame := make([]byte, n)
 		copy(frame, buf[:n])
 
@@ -756,6 +776,7 @@ func (m *Mixer) mixTick() {
 		case raw = <-p.incoming:
 		default:
 			raw = make([]byte, m.frameSizeBytes) // silence
+			p.starved.Add(1)
 		}
 		// Write raw PCM to per-participant tap (for STT) before conversion.
 		// Tap still receives audio even when muted (recording/STT of own audio).
@@ -907,4 +928,19 @@ func clamp16(s int32) int16 {
 		return math.MinInt16
 	}
 	return int16(s)
+}
+
+// ParticipantFeed reports how many frames a participant's source has produced
+// and how many mix intervals ran with nothing queued for it. A source that has
+// stopped shows framesRead flat while starved climbs — which is the difference
+// between "this party is quiet" and "this party's audio is gone", and nothing
+// downstream can tell them apart on its own.
+func (m *Mixer) ParticipantFeed(id string) (framesRead, starved uint64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.participants[id]
+	if !ok {
+		return 0, 0, false
+	}
+	return p.framesRead.Load(), p.starved.Load(), true
 }
