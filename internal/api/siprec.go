@@ -117,8 +117,7 @@ func (s *Server) HandleSIPRECInbound(call *sipmod.InboundCall, signals sipmod.SI
 	sess.state.SetRaw(md)
 
 	l := leg.NewSIPRECInboundLeg(call, s.SIPEngine, s.Log)
-	// After the leg exists, so a warning can be traced to the session it came
-	// from.
+	// After the leg exists, so a warning carries the leg it came from.
 	s.verifySIPRECMetadata(rec, sess, l.ID())
 	if appID, ok := l.SIPHeaders()["X-App-ID"]; ok {
 		l.SetAppID(appID)
@@ -196,8 +195,7 @@ func mediaSections(sdp *sipmod.SDPMedia) []siprec.MediaSection {
 	}
 	out := make([]siprec.MediaSection, 0, len(sdp.Audio))
 	for i := range sdp.Audio {
-		// An unlabelled section binds to no <stream> element, so it is not
-		// evidence about anything and is kept out of the session state.
+		// An unlabelled section binds to no <stream> element.
 		if sdp.Audio[i].Label == "" {
 			continue
 		}
@@ -210,13 +208,9 @@ func mediaSections(sdp *sipmod.SDPMedia) []siprec.MediaSection {
 }
 
 // verifySIPRECMetadata cross-checks the document against the offer it arrived
-// with and records what it could disprove.
-//
-// The session is not rejected over it. Which party is on which label is the
-// SRC's statement to make, we cannot always disprove it, and dropping a
-// recording is worse than keeping one that is flagged. But the failure mode
-// this catches — every word attributed to the wrong participant — is otherwise
-// completely silent, so it is logged at warn and exposed on the session.
+// with and records what it could disprove. The session is never rejected over
+// it: which party is on which label is the recording client's statement to
+// make, and it cannot always be disproved.
 func (s *Server) verifySIPRECMetadata(rec *siprec.Recording, sess *siprecSession, legID string) {
 	issues := siprec.Verify(rec, sess.sections)
 	sess.state.SetWarnings(issues)

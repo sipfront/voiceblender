@@ -47,25 +47,17 @@ func (i Issue) String() string {
 	return fmt.Sprintf("%s (label %s): %s", i.Kind, i.Label, i.Detail)
 }
 
-// Verify cross-checks a metadata document against the SDP it arrived with, and
+// Verify cross-checks a metadata document against the SDP it arrived with and
 // returns every disagreement it can prove, ordered deterministically.
 //
-// The label binding — a=label in the SDP, <label> in the metadata — is the only
-// thing that says which recorded stream carries which party. An SRC that gets
-// it backwards emits a document that is schema-valid, internally consistent and
-// completely wrong: the session establishes, every status code is 200, two
-// streams arrive, and every word is attributed to the other participant.
-// Nothing else in SIPREC catches that, which is why it is checked here.
-//
 // Where a section carries an a=ssrc cname naming a SIP URI, that is the SDP's
-// own statement about who sends on it, and it must agree with the participant
-// the metadata binds to the same label. Only the user part is compared: the
-// cname is written by whatever anchored the media and routinely carries a
-// different host than the AOR the SRC puts in the metadata.
+// own statement of who sends on it and must agree with the participant the
+// metadata binds to the same label. Only the user part is compared: the cname
+// is written by whatever anchored the media and routinely carries a different
+// host than the AOR.
 //
-// A nil or empty result means nothing could be disproved — not that the
-// document is right. Verify is a guard against silent corruption, not a schema
-// validator.
+// An empty result means nothing could be disproved, not that the document is
+// right.
 func Verify(r *Recording, sections []MediaSection) []Issue {
 	if r == nil {
 		return nil
@@ -122,9 +114,7 @@ func Verify(r *Recording, sections []MediaSection) []Issue {
 		}
 	}
 
-	// An offer with no labelled sections at all is no evidence about any
-	// particular label, so every stream would be reported as unknown. That is
-	// the offer being unusable for correlation, not the metadata being wrong.
+	// An offer with no labelled sections is no evidence about any label.
 	if len(offered) > 0 {
 		for label := range seenLabel {
 			if _, ok := offered[label]; !ok {
@@ -137,8 +127,7 @@ func Verify(r *Recording, sections []MediaSection) []Issue {
 		}
 	}
 
-	// Only meaningful once the document labels anything at all; a document with
-	// no labelled streams is a different (and already visible) problem.
+	// Only meaningful once the document labels anything at all.
 	if len(seenLabel) > 0 {
 		for label := range offered {
 			if _, ok := senderOfLabel[label]; !ok {
@@ -152,8 +141,7 @@ func Verify(r *Recording, sections []MediaSection) []Issue {
 	}
 
 	for label, sec := range offered {
-		// A duplicated label binds to no single participant, which the
-		// duplicate_label issue already says.
+		// A duplicated label binds to no single participant.
 		if duplicated[label] {
 			continue
 		}
