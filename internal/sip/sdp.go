@@ -1005,11 +1005,13 @@ func negotiateCodec(offeredCodecs []codec.CodecType, offeredPTs map[codec.CodecT
 // ssrcCNAME returns the cname of an "a=ssrc:<id> cname:<value>" attribute value
 // (RFC 5576), or "" when the attribute carries no cname.
 func ssrcCNAME(v string) string {
-	_, rest, ok := strings.Cut(v, " ")
-	if !ok {
+	// RFC 5576 separates the id from the attribute with a single space, but
+	// split on any run of whitespace rather than miss a cname over a tab.
+	fields := strings.Fields(v)
+	if len(fields) < 2 {
 		return ""
 	}
-	for _, f := range strings.Fields(rest) {
+	for _, f := range fields[1:] {
 		if cname, ok := strings.CutPrefix(f, "cname:"); ok {
 			return cname
 		}
