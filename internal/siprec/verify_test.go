@@ -22,18 +22,19 @@ func metadataXML(aorA, labelA, aorB, labelB string) []byte {
 </recording>`, aorA, aorB, labelA, labelB))
 }
 
-// The offer as rtpengine writes it: the caller anchored on label 0, the callee
-// on label 1, each section naming its sender in a=ssrc cname.
-func riggedOffer() []MediaSection {
+// twoPartyOffer is the shape a session recording client sends: one labelled
+// section per party, each naming its sender in a=ssrc cname. The cname hosts
+// differ from the AOR domain, as they do when a media relay writes them.
+func twoPartyOffer() []MediaSection {
 	return []MediaSection{
-		{Label: "0", CNAME: "sip:voiceos-ci-rig-a@rig.local"},
-		{Label: "1", CNAME: "sip:voiceos-ci-rig-b@172.31.10.20"},
+		{Label: "0", CNAME: "sip:alice@10.0.0.1"},
+		{Label: "1", CNAME: "sip:bob@10.0.0.2"},
 	}
 }
 
 func TestVerify(t *testing.T) {
-	const aorA = "sip:voiceos-ci-rig-a@rig.local"
-	const aorB = "sip:voiceos-ci-rig-b@rig.local"
+	const aorA = "sip:alice@example.com"
+	const aorB = "sip:bob@example.com"
 
 	cases := []struct {
 		name     string
@@ -44,29 +45,28 @@ func TestVerify(t *testing.T) {
 		{
 			name:     "labels agree with the offer",
 			metadata: metadataXML(aorA, "0", aorB, "1"),
-			sections: riggedOffer(),
+			sections: twoPartyOffer(),
 		},
 		{
-			// The bug this exists for: rtpengine puts the caller on label 0,
-			// the metadata claims label 1. Structurally valid, entirely wrong.
+			// Valid and self-consistent, but the offer says otherwise.
 			name:     "caller and callee inverted",
 			metadata: metadataXML(aorA, "1", aorB, "0"),
-			sections: riggedOffer(),
+			sections: twoPartyOffer(),
 			want: []Issue{
 				{Kind: IssueParticipantMismatch, Label: "0",
-					Detail: "offer says voiceos-ci-rig-a sends on it, metadata assigns it to voiceos-ci-rig-b (pB)"},
+					Detail: "offer says alice sends on it, metadata assigns it to bob (pB)"},
 				{Kind: IssueParticipantMismatch, Label: "1",
-					Detail: "offer says voiceos-ci-rig-b sends on it, metadata assigns it to voiceos-ci-rig-a (pA)"},
+					Detail: "offer says bob sends on it, metadata assigns it to alice (pA)"},
 			},
 		},
 		{
 			// The cname host is written by whatever anchored the media and does
-			// not have to match the AOR domain the SRC puts in the metadata.
+			// not have to match the AOR domain.
 			name:     "cname host differs from the AOR domain",
-			metadata: metadataXML(aorA, "0", "sip:voiceos-ci-rig-b@rig.local", "1"),
+			metadata: metadataXML(aorA, "0", aorB, "1"),
 			sections: []MediaSection{
-				{Label: "0", CNAME: "sip:voiceos-ci-rig-a@10.0.0.1"},
-				{Label: "1", CNAME: "sip:voiceos-ci-rig-b@10.0.0.2"},
+				{Label: "0", CNAME: "sip:alice@10.0.0.1"},
+				{Label: "1", CNAME: "sip:bob@10.0.0.2"},
 			},
 		},
 		{
@@ -90,7 +90,7 @@ func TestVerify(t *testing.T) {
 		{
 			name:     "metadata labels a stream the offer does not carry",
 			metadata: metadataXML(aorA, "0", aorB, "9"),
-			sections: riggedOffer(),
+			sections: twoPartyOffer(),
 			want: []Issue{
 				{Kind: IssueUnclaimedLabel, Label: "1", Detail: "no participant sends on this section"},
 				{Kind: IssueUnknownLabel, Label: "9", Detail: "no m= section in the offer carries this label"},
@@ -135,7 +135,7 @@ func TestVerify(t *testing.T) {
 		{
 			name:     "offer carries a section nobody sends on",
 			metadata: metadataXML(aorA, "0", aorB, "1"),
-			sections: append(riggedOffer(), MediaSection{Label: "2", CNAME: "sip:third@rig.local"}),
+			sections: append(twoPartyOffer(), MediaSection{Label: "2", CNAME: "sip:carol@example.com"}),
 			want: []Issue{
 				{Kind: IssueUnclaimedLabel, Label: "2", Detail: "no participant sends on this section"},
 			},
@@ -166,7 +166,7 @@ func TestVerify(t *testing.T) {
 func TestVerifyIgnoresDisassociatedSender(t *testing.T) {
 	md := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <recording xmlns="urn:ietf:params:xml:ns:recording:1">
-  <participant participant_id="pA"><nameID aor="sip:a@rig.local"/></participant>
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"/></participant>
   <stream stream_id="s1"><label>0</label></stream>
   <participantstreamassoc participant_id="pA"><send>s1</send><disassociate-time>2026-08-10T10:00:00Z</disassociate-time></participantstreamassoc>
 </recording>`)
@@ -176,7 +176,7 @@ func TestVerifyIgnoresDisassociatedSender(t *testing.T) {
 		t.Fatalf("parse metadata: %v", err)
 	}
 
-	got := Verify(rec, []MediaSection{{Label: "0", CNAME: "sip:a@rig.local"}})
+	got := Verify(rec, []MediaSection{{Label: "0", CNAME: "sip:alice@example.com"}})
 	want := []Issue{{Kind: IssueUnclaimedLabel, Label: "0", Detail: "no participant sends on this section"}}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("got %v, want %v", got, want)
@@ -184,22 +184,22 @@ func TestVerifyIgnoresDisassociatedSender(t *testing.T) {
 }
 
 func TestVerifyNilRecording(t *testing.T) {
-	if got := Verify(nil, riggedOffer()); got != nil {
+	if got := Verify(nil, twoPartyOffer()); got != nil {
 		t.Fatalf("got %v, want nil", got)
 	}
 }
 
 func TestAORUser(t *testing.T) {
 	cases := map[string]string{
-		"sip:alice@example.com":        "alice",
-		"sips:alice@example.com":       "alice",
-		"SIP:Alice@example.com":        "Alice",
-		"tel:+4312345@example.com":     "+4312345",
-		"alice@example.com":            "alice",
-		"randomcname":                  "",
-		"":                             "",
-		"   ":                          "",
-		"sip:voiceos-ci-rig-b@1.2.3.4": "voiceos-ci-rig-b",
+		"sip:alice@example.com":    "alice",
+		"sips:alice@example.com":   "alice",
+		"SIP:Alice@example.com":    "Alice",
+		"tel:+4312345@example.com": "+4312345",
+		"alice@example.com":        "alice",
+		"randomcname":              "",
+		"":                         "",
+		"   ":                      "",
+		"sip:bob@1.2.3.4":          "bob",
 
 		// A tel URI carries no host (RFC 3966).
 		"tel:+4312345":                   "+4312345",

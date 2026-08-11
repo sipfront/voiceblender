@@ -13,8 +13,7 @@ import (
 )
 
 // mislabelledMetadata binds participant B to a label the offer never carries.
-// The document is schema-valid and internally consistent — only the SDP it
-// arrived with contradicts it.
+// The document is valid and self-consistent; only the SDP contradicts it.
 func mislabelledMetadata(t *testing.T) []byte {
 	t.Helper()
 	rec := &siprec.Recording{
@@ -66,10 +65,8 @@ func TestSIPREC_MetadataAgreeingWithOfferIsNotFlagged(t *testing.T) {
 	}
 }
 
-// A recording whose metadata contradicts its own SDP is the one failure the
-// protocol cannot surface: the session establishes, the streams arrive, and
-// every word is attributed to whoever the metadata names. The SRS records it
-// anyway — that is not its call to refuse — but it must say so.
+// A document that contradicts its own SDP is still answered and recorded, but
+// the disagreement has to be visible.
 func TestSIPREC_MetadataDisagreeingWithOfferIsFlagged(t *testing.T) {
 	src := newTestInstance(t, "src")
 	srs := siprecInstance(t, "srs", nil)
