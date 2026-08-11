@@ -1072,6 +1072,7 @@ type siprecSessionView struct {
 	Participants []siprecParticipantView `json:"participants"`
 	Streams      []siprecStreamView      `json:"streams"`
 	Metadata     string                  `json:"metadata"`
+	Warnings     []string                `json:"warnings"`
 }
 
 func getSIPRECSession(t *testing.T, inst *testInstance, legID string) siprecSessionView {
