@@ -6282,6 +6282,8 @@ x-webhooks:
                                         description: Room identifier
                                     app_id:
                                         type: string
+                                    stream_id:
+                                        type: string
                                     text:
                                         type: string
                                         description: Transcribed text
@@ -6308,6 +6310,8 @@ x-webhooks:
                                         type: string
                                         description: Room identifier
                                     app_id:
+                                        type: string
+                                    stream_id:
                                         type: string
                                     event:
                                         type: string
