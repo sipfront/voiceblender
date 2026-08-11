@@ -31,6 +31,9 @@ const (
 	// IssueParticipantMismatch means the SDP and the metadata name different
 	// parties as the sender of the same section.
 	IssueParticipantMismatch IssueKind = "participant_mismatch"
+	// IssueAmbiguousSender means two participants claim to send on the same
+	// section, so it cannot be attributed to either.
+	IssueAmbiguousSender IssueKind = "ambiguous_sender"
 )
 
 // Issue is one metadata/SDP disagreement, identified by the label it concerns.
@@ -96,14 +99,30 @@ func Verify(r *Recording, sections []MediaSection) []Issue {
 	}
 
 	senderOfLabel := make(map[string]string, len(r.ParticipantStreams))
+	ambiguous := make(map[string]bool)
 	for _, psa := range r.ParticipantStreams {
 		if psa.DisassociateTime != "" {
 			continue
 		}
 		for _, streamID := range psa.Send {
-			if label, ok := labelOfStream[streamID]; ok {
-				senderOfLabel[label] = psa.ParticipantID
+			label, ok := labelOfStream[streamID]
+			if !ok {
+				continue
 			}
+			// Keep the first claim rather than the last, so the outcome does
+			// not depend on document order.
+			if prev, seen := senderOfLabel[label]; seen && prev != psa.ParticipantID {
+				if !duplicated[label] && !ambiguous[label] {
+					ambiguous[label] = true
+					issues = append(issues, Issue{
+						Kind:   IssueAmbiguousSender,
+						Label:  label,
+						Detail: fmt.Sprintf("participants %s and %s both send on it", prev, psa.ParticipantID),
+					})
+				}
+				continue
+			}
+			senderOfLabel[label] = psa.ParticipantID
 		}
 	}
 
@@ -141,8 +160,9 @@ func Verify(r *Recording, sections []MediaSection) []Issue {
 	}
 
 	for label, sec := range offered {
-		// A duplicated label binds to no single participant.
-		if duplicated[label] {
+		// Neither case binds the label to one participant, so there is nothing
+		// to compare the cname against.
+		if duplicated[label] || ambiguous[label] {
 			continue
 		}
 		cnameUser := aorUser(sec.CNAME)

@@ -183,6 +183,53 @@ func TestVerifyIgnoresDisassociatedSender(t *testing.T) {
 	}
 }
 
+// Two participants cannot both send on one section. Silently keeping one of
+// them would make the outcome depend on document order and hide the ambiguity.
+func TestVerifyAmbiguousSender(t *testing.T) {
+	md := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"/></participant>
+  <participant participant_id="pB"><nameID aor="sip:bob@example.com"/></participant>
+  <stream stream_id="s1"><label>0</label></stream>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+  <participantstreamassoc participant_id="pB"><send>s1</send></participantstreamassoc>
+</recording>`)
+
+	rec, err := Parse(md)
+	if err != nil {
+		t.Fatalf("parse metadata: %v", err)
+	}
+
+	// The cname names alice, but the section is not attributable, so the
+	// ambiguity is reported and no mismatch is claimed on top of it.
+	got := Verify(rec, []MediaSection{{Label: "0", CNAME: "sip:alice@example.com"}})
+	want := []Issue{{Kind: IssueAmbiguousSender, Label: "0",
+		Detail: "participants pA and pB both send on it"}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// One participant listed across several associations is not an ambiguity.
+func TestVerifyRepeatedSenderIsNotAmbiguous(t *testing.T) {
+	md := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"/></participant>
+  <stream stream_id="s1"><label>0</label></stream>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+</recording>`)
+
+	rec, err := Parse(md)
+	if err != nil {
+		t.Fatalf("parse metadata: %v", err)
+	}
+
+	if got := Verify(rec, []MediaSection{{Label: "0", CNAME: "sip:alice@example.com"}}); len(got) != 0 {
+		t.Fatalf("got %v, want no issues", got)
+	}
+}
+
 func TestVerifyNilRecording(t *testing.T) {
 	if got := Verify(nil, twoPartyOffer()); got != nil {
 		t.Fatalf("got %v, want nil", got)
