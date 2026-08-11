@@ -74,9 +74,12 @@ type State struct {
 	participants map[string]ParticipantInfo
 	streams      map[string]StreamInfo
 	// sender maps a stream_id to the participant_id sending on it.
-	sender   map[string]string
-	raw      []byte
-	warnings []string
+	sender map[string]string
+	// senderConflicts records the other participants that claimed to send on a
+	// stream within a single document, which sender alone cannot represent.
+	senderConflicts map[string][]string
+	raw             []byte
+	warnings        []string
 }
 
 // NewState returns an empty recording session state.
@@ -146,6 +149,8 @@ func (s *State) Apply(r *Recording) Delta {
 		}
 	}
 
+	conflicts := make(map[string][]string)
+	claimed := make(map[string]string)
 	for _, psa := range r.ParticipantStreams {
 		for _, streamID := range psa.Send {
 			if streamID == "" {
@@ -156,9 +161,17 @@ func (s *State) Apply(r *Recording) Delta {
 				delete(s.streams, streamID)
 				continue
 			}
+			// Two participants claiming one stream in the same document is a
+			// defect the sender map cannot hold, so it is recorded separately.
+			if prev, seen := claimed[streamID]; seen && prev != psa.ParticipantID {
+				conflicts[streamID] = append(conflicts[streamID], psa.ParticipantID)
+				continue
+			}
+			claimed[streamID] = psa.ParticipantID
 			s.sender[streamID] = psa.ParticipantID
 		}
 	}
+	s.senderConflicts = conflicts
 
 	// A participant that left the session is dropped along with the streams it
 	// was sending — those m= sections stop carrying anyone's audio.
@@ -310,6 +323,69 @@ func removedKeys[V any](before map[string]struct{}, after map[string]V) []string
 		if _, ok := after[k]; !ok {
 			out = append(out, k)
 		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Merged returns the accumulated session as a single complete document, so a
+// partial update can be checked against the whole session rather than against
+// the delta it arrived in. Ordering is deterministic.
+func (s *State) Merged() *Recording {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rec := &Recording{DataMode: DataModeComplete}
+	if s.sessionID != "" {
+		rec.Sessions = []Session{{SessionID: s.sessionID}}
+		rec.SessionRecordingAssocs = []SessionRecordingAssoc{{SessionID: s.sessionID}}
+	}
+
+	for _, id := range sortedKeys(s.participants) {
+		p := s.participants[id]
+		rec.Participants = append(rec.Participants, Participant{
+			ParticipantID: p.ID,
+			SessionID:     s.sessionID,
+			NameIDs:       []NameID{{AOR: p.AOR}},
+		})
+	}
+
+	for _, id := range sortedKeys(s.streams) {
+		st := s.streams[id]
+		rec.Streams = append(rec.Streams, Stream{
+			StreamID:  st.ID,
+			SessionID: st.SessionID,
+			Label:     st.Label,
+		})
+	}
+
+	sends := make(map[string][]string)
+	for streamID, pid := range s.sender {
+		sends[pid] = append(sends[pid], streamID)
+	}
+	for streamID, others := range s.senderConflicts {
+		for _, pid := range others {
+			sends[pid] = append(sends[pid], streamID)
+		}
+	}
+	for _, pid := range sortedKeys(sends) {
+		streams := sends[pid]
+		sort.Strings(streams)
+		rec.ParticipantStreams = append(rec.ParticipantStreams, ParticipantStreamAssoc{
+			ParticipantID: pid,
+			Send:          streams,
+		})
+	}
+	return rec
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
