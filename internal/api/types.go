@@ -457,6 +457,10 @@ type SIPRECSessionView struct {
 	Participants []SIPRECParticipantView `json:"participants"`
 	Streams      []SIPRECStreamView      `json:"streams"`
 	Metadata     string                  `json:"metadata,omitempty"`
+
+	// Warnings is empty for a document that agrees with the offer it arrived
+	// with. Entries mean the participant shown against a stream may be wrong.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 var siprecSessionViewFields = map[string]FieldEnrichment{
@@ -467,6 +471,7 @@ var siprecSessionViewFields = map[string]FieldEnrichment{
 	"participants": {Description: "Every party currently recorded by this session."},
 	"streams":      {Description: "Every negotiated media stream, joined to the participant it carries."},
 	"metadata":     {Description: "The raw rs-metadata XML document as most recently received."},
+	"warnings":     {Description: "Disagreements found between the metadata and the SDP it arrived with. Non-empty means the participant attributed to a stream may be wrong; the session is still recorded."},
 }
 
 // AddLegStreamRequest is the request body for POST /v1/legs/{id}/streams.

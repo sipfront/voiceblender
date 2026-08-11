@@ -4754,6 +4754,11 @@ components:
                 metadata:
                     type: string
                     description: The raw rs-metadata XML document as most recently received.
+                warnings:
+                    type: array
+                    items:
+                        type: string
+                    description: Disagreements found between the metadata and the SDP it arrived with. Non-empty means the participant attributed to a stream may be wrong; the session is still recorded.
             required:
                 - leg_id
                 - participants

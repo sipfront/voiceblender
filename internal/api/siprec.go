@@ -20,6 +20,9 @@ import (
 // join happens here.
 type siprecSession struct {
 	state *siprec.State
+	// sections is the offer's labelled m= sections, kept so a metadata update
+	// can be re-checked against the SDP the session was established with.
+	sections []siprec.MediaSection
 	// roomID is the room this session's streams were auto-attached to, and
 	// ownsRoom records whether we created it and must delete it on teardown.
 	roomID   string
@@ -109,9 +112,10 @@ func (s *Server) HandleSIPRECInbound(call *sipmod.InboundCall, signals sipmod.SI
 		return
 	}
 
-	sess := &siprecSession{state: siprec.NewState()}
+	sess := &siprecSession{state: siprec.NewState(), sections: mediaSections(call.RemoteSDP)}
 	sess.state.Apply(rec)
 	sess.state.SetRaw(md)
+	s.verifySIPRECMetadata(rec, sess, "")
 
 	l := leg.NewSIPRECInboundLeg(call, s.SIPEngine, s.Log)
 	if appID, ok := l.SIPHeaders()["X-App-ID"]; ok {
@@ -179,6 +183,39 @@ func (s *Server) rejectSIPREC(call *sipmod.InboundCall, signals sipmod.SIPRECSig
 func (s *Server) respondSIPREC(call *sipmod.InboundCall, code int, reason string) {
 	if err := s.SIPEngine.DialogRespond(call.Dialog, code, reason, nil, s.SIPEngine.ServerHeader()); err != nil {
 		s.Log.Error("SIPREC: respond failed", "code", code, "error", err)
+	}
+}
+
+// mediaSections reduces an offer to the labelled sections a metadata document
+// can be checked against.
+func mediaSections(sdp *sipmod.SDPMedia) []siprec.MediaSection {
+	if sdp == nil {
+		return nil
+	}
+	out := make([]siprec.MediaSection, 0, len(sdp.Audio))
+	for i := range sdp.Audio {
+		out = append(out, siprec.MediaSection{
+			Label: sdp.Audio[i].Label,
+			CNAME: sdp.Audio[i].CNAME,
+		})
+	}
+	return out
+}
+
+// verifySIPRECMetadata cross-checks the document against the offer it arrived
+// with and records what it could disprove.
+//
+// The session is not rejected over it. Which party is on which label is the
+// SRC's statement to make, we cannot always disprove it, and dropping a
+// recording is worse than keeping one that is flagged. But the failure mode
+// this catches — every word attributed to the wrong participant — is otherwise
+// completely silent, so it is logged at warn and exposed on the session.
+func (s *Server) verifySIPRECMetadata(rec *siprec.Recording, sess *siprecSession, legID string) {
+	issues := siprec.Verify(rec, sess.sections)
+	sess.state.SetWarnings(issues)
+	for _, issue := range issues {
+		s.Log.Warn("SIPREC metadata disagrees with the offer",
+			"leg_id", legID, "kind", string(issue.Kind), "label", issue.Label, "detail", issue.Detail)
 	}
 }
 
@@ -295,6 +332,7 @@ func (s *Server) applySIPRECMetadata(sl *leg.SIPLeg, body *sipmod.MessageBody) {
 	before := sess.state.Snapshot()
 	delta := sess.state.Apply(rec)
 	sess.state.SetRaw(md)
+	s.verifySIPRECMetadata(rec, sess, sl.ID())
 
 	snap := sess.state.Snapshot()
 	scope := events.LegScope{LegID: sl.ID(), AppID: sl.AppID()}
@@ -442,6 +480,7 @@ func (s *Server) doGetSIPRECSession(legID string) (*SIPRECSessionView, error) {
 		Participants: make([]SIPRECParticipantView, 0, len(snap.Participants)),
 		Streams:      make([]SIPRECStreamView, 0, len(snap.Streams)),
 		Metadata:     snap.Metadata,
+		Warnings:     snap.Warnings,
 	}
 	for _, p := range snap.Participants {
 		view.Participants = append(view.Participants, SIPRECParticipantView{

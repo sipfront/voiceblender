@@ -58,6 +58,11 @@ type Snapshot struct {
 	Participants []ParticipantInfo `json:"participants"`
 	Streams      []StreamInfo      `json:"streams"`
 	Metadata     string            `json:"metadata,omitempty"`
+
+	// Warnings holds the disagreements Verify found between the metadata and
+	// the SDP it arrived with. Non-empty means the participant bound to each
+	// stream may be wrong, which no other field can reveal.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // State accumulates the recording session's metadata across the initial INVITE
@@ -69,8 +74,9 @@ type State struct {
 	participants map[string]ParticipantInfo
 	streams      map[string]StreamInfo
 	// sender maps a stream_id to the participant_id sending on it.
-	sender map[string]string
-	raw    []byte
+	sender   map[string]string
+	raw      []byte
+	warnings []string
 }
 
 // NewState returns an empty recording session state.
@@ -197,6 +203,21 @@ func (s *State) SetRaw(raw []byte) {
 	s.raw = append([]byte(nil), raw...)
 }
 
+// SetWarnings records the metadata/SDP disagreements Verify found, replacing
+// any from an earlier document.
+func (s *State) SetWarnings(issues []Issue) {
+	if s == nil {
+		return
+	}
+	w := make([]string, 0, len(issues))
+	for _, i := range issues {
+		w = append(w, i.String())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.warnings = w
+}
+
 // SessionID returns the recording session's communication session ID.
 func (s *State) SessionID() string {
 	if s == nil {
@@ -246,6 +267,7 @@ func (s *State) Snapshot() Snapshot {
 		Participants: make([]ParticipantInfo, 0, len(s.participants)),
 		Streams:      make([]StreamInfo, 0, len(s.streams)),
 		Metadata:     string(s.raw),
+		Warnings:     append([]string(nil), s.warnings...),
 	}
 	for _, p := range s.participants {
 		snap.Participants = append(snap.Participants, p)
