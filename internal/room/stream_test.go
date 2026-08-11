@@ -373,3 +373,42 @@ func TestManagerSetLegStreamRole_Errors(t *testing.T) {
 		t.Errorf("a detached stream should still accept a role: %v", err)
 	}
 }
+
+// A recording session holds two streams and no leg participant, so the streams
+// are the only audio sources in the room. Anything acting per speaker — live
+// transcription above all — has to be able to enumerate them with the leg and
+// stream they belong to, or a SIPREC room looks empty.
+func TestStreamParticipants_AreEnumerableWithTheirLegAndRole(t *testing.T) {
+	r := NewRoom("siprec-leg-1", "", 16000, slog.New(slog.DiscardHandler))
+	l := newStreamMockLeg("leg-1", sendonlyStream("1", 8000))
+	l.streams["0"] = sendonlyStream("0", 8000)
+
+	if _, ok := r.AddLegStream(l, "0", "sip:alice@example.com"); !ok {
+		t.Fatal("AddLegStream(0) failed")
+	}
+	if _, ok := r.AddLegStream(l, "1", "sip:bob@example.com"); !ok {
+		t.Fatal("AddLegStream(1) failed")
+	}
+
+	// The room has no leg participants at all — that is the shape that used to
+	// read as "room has no participants".
+	if n := r.ParticipantCount(); n != 0 {
+		t.Fatalf("leg participants = %d, want 0 for a recording session", n)
+	}
+
+	got := r.StreamParticipants()
+	if len(got) != 2 {
+		t.Fatalf("StreamParticipants() = %d entries, want 2: %+v", len(got), got)
+	}
+	// Ordered by participant ID, so a caller starting one transcriber per entry
+	// behaves the same on every run.
+	want := []StreamParticipant{
+		{ParticipantID: "leg-1#0", LegID: "leg-1", StreamID: "0", Role: "sip:alice@example.com"},
+		{ParticipantID: "leg-1#1", LegID: "leg-1", StreamID: "1", Role: "sip:bob@example.com"},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("StreamParticipants()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
