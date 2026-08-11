@@ -55,6 +55,8 @@ func TestSSRCCNAME(t *testing.T) {
 		"123":                                    "",
 		"":                                       "",
 		"123 cname:":                             "",
+		"123\tcname:sip:alice@example.com":       "sip:alice@example.com",
+		"123  cname:sip:bob@example.com":         "sip:bob@example.com",
 	}
 	for in, want := range cases {
 		if got := ssrcCNAME(in); got != want {
