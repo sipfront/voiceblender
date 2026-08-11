@@ -3450,9 +3450,15 @@ other participant. No status code reveals it.
 The kinds are `participant_mismatch` (the section's `a=ssrc cname` names a
 different party than the metadata binds to that label — only the user part is
 compared, since the cname is written by whatever anchored the media),
-`duplicate_label`, `unknown_label` (the metadata labels a stream the offer does
-not carry) and `unclaimed_label` (the offer carries a section no participant
-sends on).
+`ambiguous_sender` (two participants claim to send on one section, so it belongs
+to neither), `duplicate_label`, `unknown_label` (the metadata labels a stream the
+offer does not carry) and `unclaimed_label` (the offer carries a section no
+participant sends on).
+
+An empty or absent `warnings` is **not** an assertion that the mapping is
+correct — only that nothing could be disproved. An offer that carries no
+`a=label` values, or no `a=ssrc cname`, gives nothing to check the metadata
+against, and produces no warnings however wrong it is.
 
 The session is answered and recorded either way: which party is on which label
 is the recording client's statement to make, an SRS cannot always disprove it,
