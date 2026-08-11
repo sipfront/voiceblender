@@ -118,7 +118,7 @@ func (s *Server) HandleSIPRECInbound(call *sipmod.InboundCall, signals sipmod.SI
 
 	l := leg.NewSIPRECInboundLeg(call, s.SIPEngine, s.Log)
 	// After the leg exists, so a warning carries the leg it came from.
-	s.verifySIPRECMetadata(rec, sess, l.ID())
+	s.verifySIPRECMetadata(sess, l.ID())
 	if appID, ok := l.SIPHeaders()["X-App-ID"]; ok {
 		l.SetAppID(appID)
 	}
@@ -211,8 +211,11 @@ func mediaSections(sdp *sipmod.SDPMedia) []siprec.MediaSection {
 // with and records what it could disprove. The session is never rejected over
 // it: which party is on which label is the recording client's statement to
 // make, and it cannot always be disproved.
-func (s *Server) verifySIPRECMetadata(rec *siprec.Recording, sess *siprecSession, legID string) {
-	issues := siprec.Verify(rec, sess.sections)
+func (s *Server) verifySIPRECMetadata(sess *siprecSession, legID string) {
+	// The merged session, not the document just applied: a partial update
+	// carries only what changed, so verifying it alone would report every
+	// stream it does not mention as unclaimed.
+	issues := siprec.Verify(sess.state.Merged(), sess.sections)
 	sess.state.SetWarnings(issues)
 	for _, issue := range issues {
 		s.Log.Warn("SIPREC metadata disagrees with the offer",
@@ -333,7 +336,19 @@ func (s *Server) applySIPRECMetadata(sl *leg.SIPLeg, body *sipmod.MessageBody) {
 	before := sess.state.Snapshot()
 	delta := sess.state.Apply(rec)
 	sess.state.SetRaw(md)
-	s.verifySIPRECMetadata(rec, sess, sl.ID())
+
+	// A re-INVITE may re-offer the media as well as the metadata. Checking new
+	// metadata against the sections of the original offer would report labels
+	// that this offer does carry as unknown.
+	if sdp, ok := body.SDP(); ok {
+		if parsed, err := sipmod.ParseSDP(sdp); err == nil {
+			sess.sections = mediaSections(parsed)
+		} else {
+			s.Log.Warn("SIPREC: re-offer SDP did not parse; keeping the previous sections",
+				"leg_id", sl.ID(), "error", err)
+		}
+	}
+	s.verifySIPRECMetadata(sess, sl.ID())
 
 	snap := sess.state.Snapshot()
 	scope := events.LegScope{LegID: sl.ID(), AppID: sl.AppID()}

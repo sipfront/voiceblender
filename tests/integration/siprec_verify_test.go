@@ -101,3 +101,75 @@ func TestSIPREC_MetadataDisagreeingWithOfferIsFlagged(t *testing.T) {
 		t.Errorf("participants = %d, want 2 — a flagged session is still recorded", len(view.Participants))
 	}
 }
+
+// A re-INVITE can re-offer the media and carry only a delta of the metadata. If
+// the new metadata is checked against the sections of the original offer, the
+// section this offer adds looks unknown; if the delta is checked instead of the
+// accumulated session, the streams it does not mention look unclaimed. Neither
+// is a real disagreement.
+func TestSIPREC_ReInviteWithNewSectionIsNotFlagged(t *testing.T) {
+	src := newTestInstance(t, "src")
+	srs := siprecInstance(t, "srs", nil)
+
+	call, err := dialSIPREC(t, src, srs, twoPartyMetadata(t))
+	if err != nil {
+		t.Fatalf("SIPREC INVITE failed: %v", err)
+	}
+	defer call.Dialog.Bye(context.Background())
+
+	legID := siprecLegID(t, srs)
+	if view := getSIPRECSession(t, srs, legID); len(view.Warnings) != 0 {
+		t.Fatalf("the initial session was flagged: %v", view.Warnings)
+	}
+
+	// A third party joins: one more sendonly section, and a partial document
+	// naming only the newcomer.
+	reInviteWithMetadata(t, src, call, srcReofferSDP(call), threePartyPartialJoin(t))
+	srs.collector.waitForMatch(t, events.SIPRECMetadataUpdated, nil, 5*time.Second)
+
+	view := getSIPRECSession(t, srs, legID)
+	if len(view.Warnings) != 0 {
+		t.Fatalf("re-offer plus partial metadata was flagged: %v", view.Warnings)
+	}
+	if len(view.Participants) != 3 {
+		t.Fatalf("participants = %d, want 3 after the join", len(view.Participants))
+	}
+}
+
+// A metadata-only re-INVITE carries no SDP, so the sections of the established
+// offer are still the ones to check against and must not be discarded.
+func TestSIPREC_MetadataOnlyReInviteKeepsTheOfferSections(t *testing.T) {
+	src := newTestInstance(t, "src")
+	srs := siprecInstance(t, "srs", nil)
+
+	call, err := dialSIPREC(t, src, srs, twoPartyMetadata(t))
+	if err != nil {
+		t.Fatalf("SIPREC INVITE failed: %v", err)
+	}
+	defer call.Dialog.Bye(context.Background())
+
+	legID := siprecLegID(t, srs)
+
+	rename := &siprec.Recording{
+		DataMode: siprec.DataModePartial,
+		Participants: []siprec.Participant{{
+			ParticipantID: "pa",
+			NameIDs:       []siprec.NameID{{AOR: "sip:alice@example.com", Name: &siprec.Name{Value: "Alice Smith"}}},
+		}},
+	}
+	md, err := rename.Marshal()
+	if err != nil {
+		t.Fatalf("marshal rename: %v", err)
+	}
+
+	reInviteWithMetadata(t, src, call, nil, md)
+	srs.collector.waitForMatch(t, events.SIPRECMetadataUpdated, nil, 5*time.Second)
+
+	view := getSIPRECSession(t, srs, legID)
+	if len(view.Warnings) != 0 {
+		t.Fatalf("metadata-only update was flagged: %v", view.Warnings)
+	}
+	if len(view.Streams) != 2 {
+		t.Fatalf("streams = %d, want 2 still bound", len(view.Streams))
+	}
+}
