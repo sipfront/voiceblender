@@ -97,6 +97,42 @@ func TestVerify(t *testing.T) {
 			},
 		},
 		{
+			// An offer with no labels is no evidence about any label. Reporting
+			// every stream as unknown would be noise, not a finding.
+			name:     "offer carries no labels at all",
+			metadata: metadataXML(aorA, "0", aorB, "1"),
+			sections: []MediaSection{{CNAME: aorA}, {CNAME: aorB}},
+		},
+		{
+			name:     "no offer at all",
+			metadata: metadataXML(aorA, "0", aorB, "1"),
+			sections: nil,
+		},
+		{
+			// tel URIs have no host, so the comparison must not fall back to
+			// "no claim made" and silently skip the check.
+			name:     "tel URIs, inverted",
+			metadata: metadataXML("tel:+43111", "1", "tel:+43222", "0"),
+			sections: []MediaSection{
+				{Label: "0", CNAME: "tel:+43111"},
+				{Label: "1", CNAME: "tel:+43222"},
+			},
+			want: []Issue{
+				{Kind: IssueParticipantMismatch, Label: "0",
+					Detail: "offer says +43111 sends on it, metadata assigns it to +43222 (pB)"},
+				{Kind: IssueParticipantMismatch, Label: "1",
+					Detail: "offer says +43222 sends on it, metadata assigns it to +43111 (pA)"},
+			},
+		},
+		{
+			name:     "tel URIs, agreeing",
+			metadata: metadataXML("tel:+43111", "0", "tel:+43222", "1"),
+			sections: []MediaSection{
+				{Label: "0", CNAME: "tel:+43111;phone-context=+43"},
+				{Label: "1", CNAME: "tel:+43222"},
+			},
+		},
+		{
 			name:     "offer carries a section nobody sends on",
 			metadata: metadataXML(aorA, "0", aorB, "1"),
 			sections: append(riggedOffer(), MediaSection{Label: "2", CNAME: "sip:third@rig.local"}),
@@ -164,6 +200,12 @@ func TestAORUser(t *testing.T) {
 		"":                             "",
 		"   ":                          "",
 		"sip:voiceos-ci-rig-b@1.2.3.4": "voiceos-ci-rig-b",
+
+		// A tel URI carries no host (RFC 3966).
+		"tel:+4312345":                   "+4312345",
+		"TEL:+4312345;phone-context=+43": "+4312345",
+		// A sip URI without a user part names a host, which identifies nobody.
+		"sip:example.com": "",
 	}
 	for in, want := range cases {
 		if got := aorUser(in); got != want {
