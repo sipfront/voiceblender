@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/VoiceBlender/voiceblender/internal/events"
 	"github.com/VoiceBlender/voiceblender/internal/leg"
@@ -424,6 +425,76 @@ func (s *Server) sttRoom(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// sttFeedInterval is how often a transcriber's audio feed is checked. Long
+// enough to be quiet on a healthy call, short enough that a stall is reported
+// while the call is still up.
+const sttFeedInterval = 5 * time.Second
+
+// watchSTTFeed reports what is happening between the mixer and a transcriber.
+// A feed can fail in two ways that are indistinguishable from the transcript
+// alone, and both end with a party silently missing from the record:
+//
+//   - the participant stops producing, so nothing is offered at all;
+//   - the transcriber stops consuming, so every frame offered is dropped.
+//
+// Neither raises an error anywhere — the tap must not block the media clock, so
+// a full buffer is a discard — which is why this exists at all.
+func (s *Server) watchSTTFeed(ctx context.Context, pw *pipeWriter, roomID, participantID, legID, streamID string) {
+	t := time.NewTicker(sttFeedInterval)
+	defer t.Stop()
+
+	// read is what the participant's source actually produced; starved is mix
+	// intervals that found nothing queued and sent silence instead. "Offered"
+	// alone cannot tell them apart, because substituted silence is offered to
+	// the tap exactly like real audio.
+	feed := func() (read, starved uint64) {
+		if rm, ok := s.RoomMgr.Get(roomID); ok {
+			r, st, _ := rm.Mixer().ParticipantFeed(participantID)
+			return r, st
+		}
+		return 0, 0
+	}
+
+	var lastOffered, lastDropped, lastRead, lastStarved uint64
+	for {
+		select {
+		case <-ctx.Done():
+			offered, dropped := pw.Stats()
+			read, starved := feed()
+			s.Log.Info("stt feed closed", "room_id", roomID, "leg_id", legID,
+				"stream_id", streamID, "offered", offered, "dropped", dropped,
+				"frames_read", read, "starved", starved)
+			return
+		case <-t.C:
+			offered, dropped := pw.Stats()
+			read, starved := feed()
+			newOffered, newDropped := offered-lastOffered, dropped-lastDropped
+			newRead, newStarved := read-lastRead, starved-lastStarved
+			lastOffered, lastDropped, lastRead, lastStarved = offered, dropped, read, starved
+
+			switch {
+			case newDropped > 0:
+				s.Log.Warn("stt feed: transcriber is not keeping up, audio discarded",
+					"room_id", roomID, "leg_id", legID, "stream_id", streamID,
+					"offered", newOffered, "dropped", newDropped,
+					"total_offered", offered, "total_dropped", dropped)
+			case newRead == 0 && newOffered > 0:
+				s.Log.Warn("stt feed: the source produced nothing, transcriber is being fed silence",
+					"room_id", roomID, "leg_id", legID, "stream_id", streamID,
+					"offered", newOffered, "starved", newStarved)
+			case newOffered == 0:
+				s.Log.Warn("stt feed: no audio offered to the transcriber",
+					"room_id", roomID, "leg_id", legID, "stream_id", streamID,
+					"interval", sttFeedInterval, "total_offered", offered)
+			default:
+				s.Log.Info("stt feed", "room_id", roomID, "leg_id", legID,
+					"stream_id", streamID, "offered", newOffered, "frames_read", newRead,
+					"starved", newStarved)
+			}
+		}
+	}
+}
+
 // startRoomLegSTT spins up a transcriber for one audio source within a room STT
 // session. participantID is the mixer's key — a leg ID for an ordinary
 // participant, "legID#streamID" for one of a leg's streams — and is what the tap
@@ -445,6 +516,8 @@ func (s *Server) startRoomLegSTT(roomID, participantID, streamID string, l leg.L
 
 	apiKey := state.apiKey
 	opts := s.attachSTTSinks(state.opts, events.LegRoomScope{LegID: l.ID(), RoomID: roomID, AppID: l.AppID()}, streamID)
+
+	go s.watchSTTFeed(l.Context(), pw, roomID, participantID, l.ID(), streamID)
 
 	go func() {
 		_ = transcriber.Start(l.Context(), sttReader, apiKey, opts, nil)

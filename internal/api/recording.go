@@ -1124,6 +1124,13 @@ type pipeWriter struct {
 	ch     chan []byte
 	done   chan struct{}
 	closed atomic.Bool
+	// offered and dropped count frames, because a full buffer here is silent
+	// data loss on the media clock and has to be observable. Without them a
+	// consumer that has stopped reading and a participant that has stopped
+	// producing look exactly alike from outside: no error, no log, just a
+	// transcript that ends mid-call.
+	offered atomic.Uint64
+	dropped atomic.Uint64
 }
 
 func (w *pipeWriter) Write(p []byte) (int, error) {
@@ -1132,13 +1139,22 @@ func (w *pipeWriter) Write(p []byte) (int, error) {
 	}
 	data := make([]byte, len(p))
 	copy(data, p)
+	w.offered.Add(1)
 	select {
 	case w.ch <- data:
 	case <-w.done:
 	default:
-		// Drop if buffer full
+		// Drop rather than block: the writer is the mixer's frame loop, and no
+		// consumer may hold up the media clock.
+		w.dropped.Add(1)
 	}
 	return len(p), nil
+}
+
+// Stats returns how many frames were handed to this pipe and how many of them
+// were dropped because the reader was not keeping up.
+func (w *pipeWriter) Stats() (offered, dropped uint64) {
+	return w.offered.Load(), w.dropped.Load()
 }
 
 // Close signals the reader to return io.EOF and stops accepting writes.
