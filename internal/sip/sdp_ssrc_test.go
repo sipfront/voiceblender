@@ -1,0 +1,65 @@
+package sip
+
+import "testing"
+
+// A SIPREC offer names the sender of each section in a=ssrc cname. That is the
+// only place the SDP itself says who is on which label, so it has to survive
+// parsing for the metadata to be checkable against it.
+func TestParseSDPSSRCCNAME(t *testing.T) {
+	offer := []byte("v=0\r\n" +
+		"o=- 1 1 IN IP4 172.31.10.11\r\n" +
+		"s=recording\r\n" +
+		"c=IN IP4 172.31.10.11\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 20132 RTP/AVP 0\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\n" +
+		"a=label:0\r\n" +
+		"a=sendonly\r\n" +
+		"a=ssrc:3881494032 cname:sip:voiceos-ci-rig-a@rig.local\r\n" +
+		"m=audio 20082 RTP/AVP 0\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\n" +
+		"a=label:1\r\n" +
+		"a=sendonly\r\n" +
+		"a=ssrc:274728081 cname:sip:voiceos-ci-rig-b@172.31.10.20\r\n" +
+		"a=ssrc:274728081 label:ignored\r\n" +
+		"m=audio 20090 RTP/AVP 0\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\n" +
+		"a=label:2\r\n")
+
+	sdp, err := ParseSDP(offer)
+	if err != nil {
+		t.Fatalf("ParseSDP: %v", err)
+	}
+	if len(sdp.Audio) != 3 {
+		t.Fatalf("got %d audio sections, want 3", len(sdp.Audio))
+	}
+
+	want := []struct{ label, cname string }{
+		{"0", "sip:voiceos-ci-rig-a@rig.local"},
+		{"1", "sip:voiceos-ci-rig-b@172.31.10.20"},
+		{"2", ""},
+	}
+	for i, w := range want {
+		if got := sdp.Audio[i].Label; got != w.label {
+			t.Errorf("section %d label = %q, want %q", i, got, w.label)
+		}
+		if got := sdp.Audio[i].CNAME; got != w.cname {
+			t.Errorf("section %d cname = %q, want %q", i, got, w.cname)
+		}
+	}
+}
+
+func TestSSRCCNAME(t *testing.T) {
+	cases := map[string]string{
+		"3881494032 cname:sip:alice@example.com": "sip:alice@example.com",
+		"123 msid:a b":                           "",
+		"123":                                    "",
+		"":                                       "",
+		"123 cname:":                             "",
+	}
+	for in, want := range cases {
+		if got := ssrcCNAME(in); got != want {
+			t.Errorf("ssrcCNAME(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

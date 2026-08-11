@@ -59,6 +59,11 @@ type RemoteAudioStream struct {
 	Content string
 	Lang    string
 
+	// CNAME is the a=ssrc cname: value, empty when the offer carries none. On a
+	// recording session it is the offer's own statement of who sends on this
+	// section, which is what the SIPREC metadata can be checked against.
+	CNAME string
+
 	RemoteIP      string
 	RemotePort    int
 	AddressFamily string // "IP4" or "IP6"
