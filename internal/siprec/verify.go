@@ -122,13 +122,18 @@ func Verify(r *Recording, sections []MediaSection) []Issue {
 		}
 	}
 
-	for label := range seenLabel {
-		if _, ok := offered[label]; !ok {
-			issues = append(issues, Issue{
-				Kind:   IssueUnknownLabel,
-				Label:  label,
-				Detail: "no m= section in the offer carries this label",
-			})
+	// An offer with no labelled sections at all is no evidence about any
+	// particular label, so every stream would be reported as unknown. That is
+	// the offer being unusable for correlation, not the metadata being wrong.
+	if len(offered) > 0 {
+		for label := range seenLabel {
+			if _, ok := offered[label]; !ok {
+				issues = append(issues, Issue{
+					Kind:   IssueUnknownLabel,
+					Label:  label,
+					Detail: "no m= section in the offer carries this label",
+				})
+			}
 		}
 	}
 
@@ -188,14 +193,24 @@ func aorUser(v string) string {
 	if v == "" {
 		return ""
 	}
+	scheme := ""
 	if i := strings.IndexByte(v, ':'); i >= 0 {
-		switch strings.ToLower(v[:i]) {
+		switch s := strings.ToLower(v[:i]); s {
 		case "sip", "sips", "tel":
-			v = v[i+1:]
+			scheme, v = s, v[i+1:]
 		}
 	}
 	if i := strings.IndexByte(v, '@'); i >= 0 {
 		return v[:i]
+	}
+	// A tel URI has no host (RFC 3966), so the whole value up to the first
+	// parameter is the number. A sip URI without a user part names only a
+	// host, which identifies nobody.
+	if scheme == "tel" {
+		if i := strings.IndexByte(v, ';'); i >= 0 {
+			return v[:i]
+		}
+		return v
 	}
 	return ""
 }

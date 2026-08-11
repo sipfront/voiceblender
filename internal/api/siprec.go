@@ -115,9 +115,11 @@ func (s *Server) HandleSIPRECInbound(call *sipmod.InboundCall, signals sipmod.SI
 	sess := &siprecSession{state: siprec.NewState(), sections: mediaSections(call.RemoteSDP)}
 	sess.state.Apply(rec)
 	sess.state.SetRaw(md)
-	s.verifySIPRECMetadata(rec, sess, "")
 
 	l := leg.NewSIPRECInboundLeg(call, s.SIPEngine, s.Log)
+	// After the leg exists, so a warning can be traced to the session it came
+	// from.
+	s.verifySIPRECMetadata(rec, sess, l.ID())
 	if appID, ok := l.SIPHeaders()["X-App-ID"]; ok {
 		l.SetAppID(appID)
 	}
