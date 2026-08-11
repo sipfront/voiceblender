@@ -447,30 +447,30 @@ func (s *Server) watchSTTFeed(ctx context.Context, pw *pipeWriter, roomID, parti
 	// intervals that found nothing queued and sent silence instead. "Offered"
 	// alone cannot tell them apart, because substituted silence is offered to
 	// the tap exactly like real audio.
-	feed := func() (read, starved uint64) {
+	feed := func() (read, starved, short uint64) {
 		if rm, ok := s.RoomMgr.Get(roomID); ok {
-			r, st, _ := rm.Mixer().ParticipantFeed(participantID)
-			return r, st
+			r, st, sh, _ := rm.Mixer().ParticipantFeed(participantID)
+			return r, st, sh
 		}
-		return 0, 0
+		return 0, 0, 0
 	}
 
-	var lastOffered, lastDropped, lastRead, lastStarved uint64
+	var lastOffered, lastDropped, lastRead, lastStarved, lastShort uint64
 	for {
 		select {
 		case <-ctx.Done():
 			offered, dropped := pw.Stats()
-			read, starved := feed()
+			read, starved, short := feed()
 			s.Log.Info("stt feed closed", "room_id", roomID, "leg_id", legID,
 				"stream_id", streamID, "offered", offered, "dropped", dropped,
-				"frames_read", read, "starved", starved)
+				"frames_read", read, "starved", starved, "short_reads", short)
 			return
 		case <-t.C:
 			offered, dropped := pw.Stats()
-			read, starved := feed()
+			read, starved, short := feed()
 			newOffered, newDropped := offered-lastOffered, dropped-lastDropped
-			newRead, newStarved := read-lastRead, starved-lastStarved
-			lastOffered, lastDropped, lastRead, lastStarved = offered, dropped, read, starved
+			newRead, newStarved, newShort := read-lastRead, starved-lastStarved, short-lastShort
+			lastOffered, lastDropped, lastRead, lastStarved, lastShort = offered, dropped, read, starved, short
 
 			switch {
 			case newDropped > 0:
@@ -489,7 +489,7 @@ func (s *Server) watchSTTFeed(ctx context.Context, pw *pipeWriter, roomID, parti
 			default:
 				s.Log.Info("stt feed", "room_id", roomID, "leg_id", legID,
 					"stream_id", streamID, "offered", newOffered, "frames_read", newRead,
-					"starved", newStarved)
+					"starved", newStarved, "short_reads", newShort)
 			}
 		}
 	}

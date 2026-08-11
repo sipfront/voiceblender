@@ -68,13 +68,16 @@ type Participant struct {
 	// so closing it here would silence the live successor.
 	ownerClosesEgress atomic.Bool
 
-	// framesRead counts frames taken from Reader, and starved counts mix
-	// intervals where nothing was queued and silence was substituted. Together
-	// they distinguish a participant that has gone quiet from one whose source
-	// has stopped, which is otherwise invisible: both look like silence to
-	// everything downstream.
+	// framesRead counts complete mix frames assembled from Reader, starved
+	// counts mix intervals where nothing was queued and silence was
+	// substituted, and shortReads counts reads that returned less than a whole
+	// frame — a source whose packets are smaller than Ptime. Together they
+	// distinguish a participant that has gone quiet from one whose source has
+	// stopped or changed packetisation, which is otherwise invisible: all of it
+	// looks like silence to everything downstream.
 	framesRead atomic.Uint64
 	starved    atomic.Uint64
+	shortReads atomic.Uint64
 
 	// Muted prevents this participant's audio from contributing to the mix
 	// and suppresses speaking events. Lock-free via atomic.
@@ -643,6 +646,31 @@ func (m *Mixer) recoverTick() {
 
 // readLoop continuously reads PCM frames from a participant's Reader
 // and buffers them for the mix loop. Blocks on IO (RTP receive).
+// fillFrame reads until buf holds a complete mix frame, or the source fails.
+// A short read is normal — it means the source's packets are smaller than one
+// frame — so it is counted and read again rather than passed on as if it were a
+// whole frame. Blocking here is what the loop already did for the first packet
+// of every frame; the mix tick substitutes silence meanwhile, exactly as it does
+// for a participant that has nothing queued.
+//
+// A partial frame at end of stream is discarded with the error: the last
+// fraction of a frame is worth less than the risk of handing the mix a short
+// one.
+func (m *Mixer) fillFrame(p *Participant, buf []byte) error {
+	filled := 0
+	for filled < len(buf) {
+		n, err := p.Reader.Read(buf[filled:])
+		if err != nil {
+			return err
+		}
+		if n > 0 && filled+n < len(buf) {
+			p.shortReads.Add(1)
+		}
+		filled += n
+	}
+	return nil
+}
+
 func (m *Mixer) readLoop(p *Participant, stopCh <-chan struct{}) {
 	defer m.recoverParticipant(p, "readLoop")
 	buf := make([]byte, m.frameSizeBytes)
@@ -655,8 +683,23 @@ func (m *Mixer) readLoop(p *Participant, stopCh <-chan struct{}) {
 		default:
 		}
 
-		n, err := p.Reader.Read(buf)
-		if err != nil {
+		// Fill a whole mix frame before queueing one.
+		//
+		// A source is not obliged to hand us exactly one frame per Read: its
+		// packetisation is its own business, and a peer may change it mid-call
+		// without renegotiating — ptime is advisory, and nothing here parses it
+		// anyway. Treating one Read as one frame silently decimated any source
+		// sending less than Ptime per packet: the mix loop consumes exactly one
+		// queued entry per tick, so a peer at 10 ms produced two entries per
+		// tick, the surplus fell out of the drop-oldest branch below, and what
+		// survived was half-length. Half the audio gone, from the mix, from
+		// every tap, and from transcription — with nothing to report it,
+		// because the recording taps the leg before the mixer and looked fine.
+		//
+		// Longer packets always worked: the readers underneath keep their
+		// leftovers. Only the short side was broken, which is why this went
+		// unnoticed until a peer switched to 10 ms after a hold.
+		if err := m.fillFrame(p, buf); err != nil {
 			// A participant that stops reading contributes silence for the rest
 			// of the call: the mix loop substitutes a silent frame when nothing
 			// is queued, and the per-participant tap receives that silence too.
@@ -671,8 +714,8 @@ func (m *Mixer) readLoop(p *Participant, stopCh <-chan struct{}) {
 			return
 		}
 		p.framesRead.Add(1)
-		frame := make([]byte, n)
-		copy(frame, buf[:n])
+		frame := make([]byte, len(buf))
+		copy(frame, buf)
 
 		// Buffer the frame. If full, drop oldest to prevent lag.
 		select {
@@ -935,12 +978,12 @@ func clamp16(s int32) int16 {
 // stopped shows framesRead flat while starved climbs — which is the difference
 // between "this party is quiet" and "this party's audio is gone", and nothing
 // downstream can tell them apart on its own.
-func (m *Mixer) ParticipantFeed(id string) (framesRead, starved uint64, ok bool) {
+func (m *Mixer) ParticipantFeed(id string) (framesRead, starved, shortReads uint64, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.participants[id]
 	if !ok {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return p.framesRead.Load(), p.starved.Load(), true
+	return p.framesRead.Load(), p.starved.Load(), p.shortReads.Load(), true
 }
