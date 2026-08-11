@@ -196,6 +196,11 @@ func mediaSections(sdp *sipmod.SDPMedia) []siprec.MediaSection {
 	}
 	out := make([]siprec.MediaSection, 0, len(sdp.Audio))
 	for i := range sdp.Audio {
+		// An unlabelled section binds to no <stream> element, so it is not
+		// evidence about anything and is kept out of the session state.
+		if sdp.Audio[i].Label == "" {
+			continue
+		}
 		out = append(out, siprec.MediaSection{
 			Label: sdp.Audio[i].Label,
 			CNAME: sdp.Audio[i].CNAME,
