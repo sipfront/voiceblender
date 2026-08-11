@@ -100,3 +100,102 @@ func TestMergedReassignmentIsNotAConflict(t *testing.T) {
 		t.Fatalf("got %v, want none: a reassignment is not an ambiguity", got)
 	}
 }
+
+// An ambiguity is only resolved by a document that speaks for the stream again.
+// An unrelated partial update must not make it disappear.
+func TestMergedConflictSurvivesUnrelatedUpdate(t *testing.T) {
+	conflicting := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"/></participant>
+  <participant participant_id="pB"><nameID aor="sip:bob@example.com"/></participant>
+  <stream stream_id="s1"><label>0</label></stream>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+  <participantstreamassoc participant_id="pB"><send>s1</send></participantstreamassoc>
+</recording>`)
+	offer := []MediaSection{{Label: "0", CNAME: "sip:alice@example.com"}}
+	want := Issue{Kind: IssueAmbiguousSender, Label: "0",
+		Detail: "participants pA and pB both send on it"}
+
+	st := NewState()
+	rec, err := Parse(conflicting)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	st.Apply(rec)
+	if got := Verify(st.Merged(), offer); len(got) != 1 || got[0] != want {
+		t.Fatalf("before the update: got %v, want [%v]", got, want)
+	}
+
+	// A rename, saying nothing about s1. Nothing has resolved the ambiguity.
+	rename, err := Parse([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <datamode>partial</datamode>
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"><name>Alice</name></nameID></participant>
+</recording>`))
+	if err != nil {
+		t.Fatalf("parse rename: %v", err)
+	}
+	st.Apply(rename)
+
+	if got := Verify(st.Merged(), offer); len(got) != 1 || got[0] != want {
+		t.Fatalf("after an unrelated update: got %v, want [%v]", got, want)
+	}
+}
+
+// A document that speaks for the stream again, with one sender, resolves it.
+func TestMergedConflictResolvedByRestatement(t *testing.T) {
+	st := NewState()
+	rec, err := Parse([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"/></participant>
+  <participant participant_id="pB"><nameID aor="sip:bob@example.com"/></participant>
+  <stream stream_id="s1"><label>0</label></stream>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+  <participantstreamassoc participant_id="pB"><send>s1</send></participantstreamassoc>
+</recording>`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	st.Apply(rec)
+
+	fixed, err := Parse([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <datamode>partial</datamode>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+</recording>`))
+	if err != nil {
+		t.Fatalf("parse fixed: %v", err)
+	}
+	st.Apply(fixed)
+
+	if got := Verify(st.Merged(), []MediaSection{{Label: "0", CNAME: "sip:alice@example.com"}}); len(got) != 0 {
+		t.Fatalf("got %v, want none once the stream is restated with one sender", got)
+	}
+}
+
+// A complete document replaces the session, conflicts included.
+func TestMergedCompleteDocumentClearsConflict(t *testing.T) {
+	st := NewState()
+	rec, err := Parse([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<recording xmlns="urn:ietf:params:xml:ns:recording:1">
+  <participant participant_id="pA"><nameID aor="sip:alice@example.com"/></participant>
+  <participant participant_id="pB"><nameID aor="sip:bob@example.com"/></participant>
+  <stream stream_id="s1"><label>0</label></stream>
+  <participantstreamassoc participant_id="pA"><send>s1</send></participantstreamassoc>
+  <participantstreamassoc participant_id="pB"><send>s1</send></participantstreamassoc>
+</recording>`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	st.Apply(rec)
+
+	clean, err := Parse(metadataXML("sip:alice@example.com", "0", "sip:bob@example.com", "1"))
+	if err != nil {
+		t.Fatalf("parse clean: %v", err)
+	}
+	st.Apply(clean)
+
+	if got := Verify(st.Merged(), twoPartyOffer()); len(got) != 0 {
+		t.Fatalf("got %v, want none after a complete document", got)
+	}
+}
