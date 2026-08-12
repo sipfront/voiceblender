@@ -2694,7 +2694,7 @@ Start recording the full room mix to a WAV file (16-bit, mono, at the room's con
 |-------|------|----------|-------------|
 | `storage` | string | no | `"file"` (default) — local disk, `"s3"` — upload to S3 after recording stops, `"gcs"` — upload to Google Cloud Storage via the native GCS API |
 | `filename` | string | no | Optional output basename for the room-mix WAV. Same rules as `POST /v1/legs/{id}/record` (`filename`): single path segment, `.wav` appended when missing, dots preserved, `409` on collision. When omitted, a timestamped name is generated. Does not rename the optional multi-channel merge file. |
-| `multi_channel` | boolean | no | When `true`, produce a single multi-channel WAV file with one track per participant (time-aligned with silence padding), in addition to the full mix. Default `false`. |
+| `multi_channel` | boolean | no | When `true`, produce a single multi-channel WAV file with one track per participant (time-aligned with silence padding), in addition to the full mix. Covers leg participants and attached streams alike. Default `false`. |
 | `s3_bucket` | string | no | S3 bucket name. Overrides `S3_BUCKET` env var. Required if env var is not set. |
 | `s3_region` | string | no | AWS region. Overrides `S3_REGION` env var. Default `us-east-1`. |
 | `s3_endpoint` | string | no | Custom S3 endpoint (MinIO, etc.). Overrides `S3_ENDPOINT` env var. |
@@ -2741,10 +2741,24 @@ This gives you one file ready for post-production — each speaker on a clean is
 
 The per-participant audio capture uses a dedicated mixer tap that is independent of STT/agent taps, so multi-channel recording and STT can run simultaneously without conflict.
 
+A room holds two kinds of audio source and both are recorded: ordinary **leg**
+participants, and a leg's individual **streams** attached with
+[`POST /v1/legs/{id}/streams/{streamId}/room`](#post-v1legsidstreamsstreamidroom).
+A SIPREC recording session is the second kind and only the second kind — its m=
+sections are other parties' audio, so the room holds one stream participant per
+recorded party and no leg participant at all. `channels` is keyed by the mixer
+participant ID, which for a stream is `"<legID>#<streamID>"`; resolve it to a
+person through [`GET /v1/legs/{id}/siprec`](#get-v1legsidsiprec).
+
+Recording a room is therefore how a controller records *some* of a session's
+parties: which streams are in the room decides who is captured, and a stream in
+no room is never read. Recording the whole session with
+[`POST /v1/legs/{id}/record`](#post-v1legsidrecord) captures every party instead.
+
 **Errors:**
 - `400` — Invalid storage type, S3 not configured, invalid S3 credentials, or invalid `filename`
 - `404` — Room not found
-- `409` — Room has no participants, or `filename` already exists / in use
+- `409` — Room has no audio sources (no leg participants and no attached streams), or `filename` already exists / in use
 - `500` — Failed to create recording file
 
 ---

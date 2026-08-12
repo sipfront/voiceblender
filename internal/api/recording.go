@@ -17,6 +17,7 @@ import (
 	"github.com/VoiceBlender/voiceblender/internal/events"
 	"github.com/VoiceBlender/voiceblender/internal/leg"
 	"github.com/VoiceBlender/voiceblender/internal/recording"
+	"github.com/VoiceBlender/voiceblender/internal/room"
 	"github.com/VoiceBlender/voiceblender/internal/storage"
 	"github.com/go-chi/chi/v5"
 )
@@ -682,6 +683,39 @@ func (s *Server) resumeRecordLeg(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// roomRecordSource is one audio source in a room: the mixer participant to tap
+// and a context to hang the capture on.
+type roomRecordSource struct {
+	participantID string
+	ctx           context.Context
+}
+
+// roomRecordSources lists every audio source in a room, of both kinds.
+//
+// Legs are the ordinary case. Streams are the case a recording session is made
+// of: a SIPREC session's m= sections are other parties' audio, so the room holds
+// one stream participant per party and no leg participant at all. Counting legs
+// alone answered "room has no participants" for exactly the topology where a
+// per-party recording is the point — the same way room STT did before it took
+// stream participants into account.
+func (s *Server) roomRecordSources(rm *room.Room, roomID string) []roomRecordSource {
+	var out []roomRecordSource
+	for _, l := range rm.Participants() {
+		out = append(out, roomRecordSource{participantID: l.ID(), ctx: l.Context()})
+	}
+	for _, sp := range rm.StreamParticipants() {
+		l, ok := s.LegMgr.Get(sp.LegID)
+		if !ok {
+			// The stream outlived its leg; there is nothing to hang a capture on.
+			s.Log.Warn("room recording: stream participant has no leg",
+				"room_id", roomID, "participant_id", sp.ParticipantID, "leg_id", sp.LegID)
+			continue
+		}
+		out = append(out, roomRecordSource{participantID: sp.ParticipantID, ctx: l.Context()})
+	}
+	return out
+}
+
 func (s *Server) doStartRecordRoom(ctx context.Context, roomID string, req RecordRequest) (*RecordingStartResult, error) {
 	rm, ok := s.RoomMgr.Get(roomID)
 	if !ok {
@@ -695,8 +729,8 @@ func (s *Server) doStartRecordRoom(ctx context.Context, roomID string, req Recor
 	if err != nil {
 		return nil, newAPIError(http.StatusBadRequest, "%s", err.Error())
 	}
-	parts := rm.Participants()
-	if len(parts) == 0 {
+	sources := s.roomRecordSources(rm, roomID)
+	if len(sources) == 0 {
 		return nil, newAPIError(http.StatusConflict, "room has no participants")
 	}
 
@@ -705,7 +739,7 @@ func (s *Server) doStartRecordRoom(ctx context.Context, roomID string, req Recor
 	rm.Mixer().SetTap(pw)
 
 	rec := recording.NewRecorder(s.Log)
-	fpath, err := rec.StartAt(parts[0].Context(), pr, s.Config.RecordingDir, uint32(rm.Mixer().SampleRate()), basename)
+	fpath, err := rec.StartAt(sources[0].ctx, pr, s.Config.RecordingDir, uint32(rm.Mixer().SampleRate()), basename)
 	if err != nil {
 		rm.Mixer().SetTap(nil)
 		pw.Close()
@@ -742,8 +776,8 @@ func (s *Server) doStartRecordRoom(ctx context.Context, roomID string, req Recor
 		roomMultiChannel.m[id] = mc
 		roomMultiChannel.Unlock()
 		mix := rm.Mixer()
-		for _, p := range parts {
-			mc.startLeg(p.ID(), mix, s.Config.RecordingDir)
+		for _, src := range sources {
+			mc.startLeg(src.participantID, mix, s.Config.RecordingDir)
 		}
 	}
 
@@ -992,7 +1026,7 @@ func (s *Server) resumeRecordRoom(w http.ResponseWriter, r *http.Request) {
 // remain. Called after a leg is removed from a room.
 func (s *Server) stopRoomRecordingIfEmpty(roomID string) {
 	rm, ok := s.RoomMgr.Get(roomID)
-	if !ok || rm.ParticipantCount() > 0 {
+	if !ok || rm.ParticipantCount() > 0 || len(rm.StreamParticipants()) > 0 {
 		return
 	}
 
@@ -1040,6 +1074,41 @@ func (s *Server) onLegJoinedRoomRecording(roomID, legID string) {
 		return
 	}
 	mc.startLeg(legID, rm.Mixer(), s.Config.RecordingDir)
+}
+
+// onStreamJoinedRoomRecording starts a per-participant capture for a stream
+// attached to a room that is already recording multi-channel, so a party who
+// joins a recorded call mid-session gets a track like everyone else.
+func (s *Server) onStreamJoinedRoomRecording(roomID, participantID string) {
+	roomMultiChannel.Lock()
+	mc := roomMultiChannel.m[roomID]
+	roomMultiChannel.Unlock()
+	if mc == nil {
+		return
+	}
+
+	rm, ok := s.RoomMgr.Get(roomID)
+	if !ok {
+		return
+	}
+	mc.startLeg(participantID, rm.Mixer(), s.Config.RecordingDir)
+}
+
+// onStreamLeavingRoomRecording stops the per-participant capture for a stream
+// leaving a room with active multi-channel recording.
+func (s *Server) onStreamLeavingRoomRecording(roomID, participantID string) {
+	roomMultiChannel.Lock()
+	mc := roomMultiChannel.m[roomID]
+	roomMultiChannel.Unlock()
+	if mc == nil {
+		return
+	}
+
+	rm, ok := s.RoomMgr.Get(roomID)
+	if !ok {
+		return
+	}
+	mc.stopLeg(participantID, rm.Mixer())
 }
 
 // onLegLeavingRoomRecording stops the per-participant recording for a leg
