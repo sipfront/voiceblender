@@ -24,6 +24,15 @@ const (
 	// recommends for Flux's turn detector.
 	fluxFrameBytes   = 2560
 	fluxDefaultModel = "flux-general-en"
+	// The only model that accepts language hints. Deepgram refuses the connection
+	// outright otherwise:
+	//
+	//   400 INVALID_QUERY_PARAMETER
+	//   `language_hint` is only supported on the flux-general-multi model.
+	//
+	// A refused dial means no transcription at all for the call, so this is not a
+	// detail that degrades — it is the difference between a transcript and nothing.
+	fluxMultiModel = "flux-general-multi"
 )
 
 var fluxCloseFrame = []byte(`{"type":"CloseStream"}`)
@@ -45,8 +54,21 @@ func NewDeepgramFlux(log *slog.Logger) *FluxTranscriber {
 
 func buildFluxURL(opts Options) string {
 	model := opts.Model
-	if model == "" {
+	hints := opts.LanguageHints
+	switch {
+	case model == "" && len(hints) > 0:
+		// Asking for language hints is asking for the multilingual model: the
+		// English-only one refuses them, and refusing the dial loses the whole
+		// transcript rather than just the hint.
+		model = fluxMultiModel
+	case model == "":
 		model = fluxDefaultModel
+	case model != fluxMultiModel && len(hints) > 0:
+		// A caller that named the English-only model and also gave hints has asked
+		// for two contradictory things. The model is what they said explicitly, so
+		// it wins, and the hints are dropped — the alternative is a 400 and no
+		// transcription at all.
+		hints = nil
 	}
 
 	var b strings.Builder
@@ -65,7 +87,7 @@ func buildFluxURL(opts Options) string {
 	if opts.EOTTimeoutMs != nil {
 		fmt.Fprintf(&b, "&eot_timeout_ms=%d", *opts.EOTTimeoutMs)
 	}
-	for _, h := range opts.LanguageHints {
+	for _, h := range hints {
 		b.WriteString("&language_hint=")
 		b.WriteString(url.QueryEscape(h))
 	}
