@@ -48,6 +48,29 @@ func TestBuildFluxURL(t *testing.T) {
 			want: "wss://api.deepgram.com/v2/listen?encoding=linear16&sample_rate=16000&model=flux-general-multi&language_hint=en&language_hint=es",
 		},
 		{
+			// Hints with no model named: the multilingual model is what hints are
+			// for, and the default one refuses them outright.
+			//
+			//   400 INVALID_QUERY_PARAMETER
+			//   `language_hint` is only supported on the flux-general-multi model.
+			//
+			// This built `model=flux-general-en&language_hint=en&language_hint=de`,
+			// Deepgram refused the dial, and the call had no transcript at all — with
+			// the reason only in this process's log, so every screen above it said
+			// nothing had been said.
+			name: "hints_imply_the_multilingual_model",
+			opts: Options{LanguageHints: []string{"en", "de"}},
+			want: "wss://api.deepgram.com/v2/listen?encoding=linear16&sample_rate=16000&model=flux-general-multi&language_hint=en&language_hint=de",
+		},
+		{
+			// A caller that named the English-only model *and* gave hints asked for
+			// two contradictory things. What they said explicitly wins and the hints
+			// are dropped: transcription in one language beats a refused dial.
+			name: "an_explicit_english_model_drops_the_hints",
+			opts: Options{Model: "flux-general-en", LanguageHints: []string{"en", "de"}},
+			want: "wss://api.deepgram.com/v2/listen?encoding=linear16&sample_rate=16000&model=flux-general-en",
+		},
+		{
 			name: "keyterms_are_escaped",
 			opts: Options{Keyterms: []string{"co pilot"}},
 			want: "wss://api.deepgram.com/v2/listen?encoding=linear16&sample_rate=16000&model=flux-general-en&keyterm=co+pilot",
