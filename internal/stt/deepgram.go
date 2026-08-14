@@ -246,6 +246,12 @@ type dgResult struct {
 	} `json:"channel"`
 	IsFinal     bool `json:"is_final"`
 	SpeechFinal bool `json:"speech_final"`
+	// Where in the stream this result covers, in seconds from the first audio.
+	// Deepgram sends both on every Results frame, and they are the only honest
+	// answer to "when was this said" — the moment the frame arrives is the moment
+	// the provider finished, not the moment somebody spoke.
+	Start    float64 `json:"start"`
+	Duration float64 `json:"duration"`
 }
 
 // dgUtteranceEnd is sent when utterance_end_ms is configured and Deepgram
@@ -351,6 +357,8 @@ func (t *DeepgramTranscriber) recvLoop(ctx context.Context, conn net.Conn, lw *w
 				Text:        text,
 				IsFinal:     isFinal,
 				SpeechFinal: result.SpeechFinal,
+				AudioStart:  result.Start,
+				AudioEnd:    result.Start + result.Duration,
 			})
 
 		case "UtteranceEnd":

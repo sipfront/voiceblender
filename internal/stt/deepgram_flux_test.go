@@ -318,3 +318,59 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// A transcript says where in the audio it was said.
+//
+// Dispatched directly rather than over the scripted socket: this is about what one
+// frame turns into, and the socket adds nothing but a race to it.
+//
+// The arrival time of a turn is not when it was said. Flux reports a turn when the
+// turn *ends*, so anything stamping the callback with its own clock puts a sentence
+// several seconds after the words — and the longer somebody speaks the further out it
+// is. An application lining a transcript up against the recording cannot do it from
+// arrival times, and until now nothing else was on offer.
+func TestFluxTranscriptCarriesWhenItWasSaid(t *testing.T) {
+	tr := NewDeepgramFlux(slog.Default())
+
+	var c collector
+	tr.dispatchTurn(fluxMessage{
+		Type: "TurnInfo", Event: "EndOfTurn", Transcript: "hello there",
+		AudioWindowStart: 0, AudioWindowEnd: 12.5,
+		Words: []fluxWord{
+			{Word: "hello", Start: 7.2, End: 7.6},
+			{Word: "there", Start: 7.6, End: 8.1},
+		},
+	}, c.sinks(Options{}), nil)
+
+	if len(c.transcripts) != 1 {
+		t.Fatalf("one transcript: %+v", c.transcripts)
+	}
+	// The words' own timings, not the window: the window is the audio the model was
+	// considering and it opens before the speaker does, so seeking to it lands on
+	// silence — often several seconds of it.
+	if got := c.transcripts[0]; got.AudioStart != 7.2 || got.AudioEnd != 8.1 {
+		t.Errorf("span = %v..%v, want the first word's start and the last word's end", got.AudioStart, got.AudioEnd)
+	}
+
+	// A turn with no word timings still happened somewhere, so the window is the
+	// fallback rather than zero — which would seek every such line to the start.
+	var wordless collector
+	tr.dispatchTurn(fluxMessage{
+		Type: "TurnInfo", Event: "EndOfTurn", Transcript: "mm",
+		AudioWindowStart: 3, AudioWindowEnd: 4,
+	}, wordless.sinks(Options{}), nil)
+	if got := wordless.transcripts[0]; got.AudioStart != 3 || got.AudioEnd != 4 {
+		t.Errorf("span = %v..%v, want the window", got.AudioStart, got.AudioEnd)
+	}
+
+	// A partial is where the turn has got to so far, and carries the same span: a
+	// live caption places it exactly as the final does.
+	var partials collector
+	tr.dispatchTurn(fluxMessage{
+		Type: "TurnInfo", Event: "Update", Transcript: "hel",
+		Words: []fluxWord{{Word: "hel", Start: 7.2, End: 7.4}},
+	}, partials.sinks(Options{Partial: true}), nil)
+	if len(partials.transcripts) != 1 || partials.transcripts[0].AudioStart != 7.2 {
+		t.Errorf("a partial is placed too: %+v", partials.transcripts)
+	}
+}
