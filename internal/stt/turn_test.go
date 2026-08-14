@@ -2,6 +2,7 @@ package stt
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -228,4 +229,24 @@ func TestDeepgramDispatch_SpeechFinalAndUtteranceEnd(t *testing.T) {
 			t.Errorf("transcript = %+v, want the final 'hello there'", c.transcripts[0])
 		}
 	})
+}
+
+// Deepgram v1 says where a result sits in the stream on every Results frame, and the
+// names it uses are `start` and `duration` rather than a span. Pinning the wire names
+// is the point: a typo in a JSON tag is a silent zero, and a zero here would seek
+// every line of a transcript to the beginning of the call.
+func TestDeepgramResultCarriesWhereItWasSaid(t *testing.T) {
+	var r dgResult
+	raw := `{"type":"Results","start":7.2,"duration":0.9,"is_final":true,"speech_final":true,` +
+		`"channel":{"alternatives":[{"transcript":"hello there"}]}}`
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Start != 7.2 || r.Duration != 0.9 {
+		t.Fatalf("start/duration = %v/%v", r.Start, r.Duration)
+	}
+	// The event carries a span, so the end is the sum — Deepgram does not send one.
+	if end := r.Start + r.Duration; end != 8.1 {
+		t.Errorf("end = %v, want 8.1", end)
+	}
 }
