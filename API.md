@@ -3491,6 +3491,48 @@ curl localhost:8080/v1/legs/$LEG_ID/siprec
 
 The VSI equivalent is the `siprec_get` command with `{"id": "<leg id>"}`.
 
+#### `warnings`
+
+The metadata is checked against the SDP it arrived with, and anything that can
+be disproved is reported in `warnings` (absent when there is nothing to report):
+
+```json
+"warnings": [
+  "participant_mismatch (label 0): offer says alice sends on it, metadata assigns it to bob (pb)"
+]
+```
+
+This exists because the binding between the two — `a=label` in the SDP,
+`<label>` in the metadata — is the only thing that says which recorded stream
+carries which party, and a recording client that gets it backwards sends a
+document that is schema-valid, internally consistent and completely wrong. The
+session establishes, both streams arrive, and every word is attributed to the
+other participant. No status code reveals it.
+
+The kinds are `participant_mismatch` (the section's `a=ssrc cname` names a
+different party than the metadata binds to that label — only the user part is
+compared, since the cname is written by whatever anchored the media),
+`ambiguous_sender` (two participants claim to send on one section, so it belongs
+to neither), `duplicate_label`, `unknown_label` (the metadata labels a stream the
+offer does not carry) and `unclaimed_label` (the metadata declares a stream no
+participant sends on).
+
+A section the metadata says nothing about is **not** reported. It is not a
+contradiction, and it is what a departure leaves behind: a party's association is
+closed with a `disassociate-time` and its stream drops out of the session while
+the `m=` section stays in the offer. Reporting it would flag every call somebody
+hangs up early on.
+
+An empty or absent `warnings` is **not** an assertion that the mapping is
+correct — only that nothing could be disproved. An offer that carries no
+`a=label` values, or no `a=ssrc cname`, gives nothing to check the metadata
+against, and produces no warnings however wrong it is.
+
+The session is answered and recorded either way: which party is on which label
+is the recording client's statement to make, an SRS cannot always disprove it,
+and dropping a recording is worse than keeping one that is flagged. Warnings are
+also logged at `warn`.
+
 ### Using the recorded audio
 
 Because the streams are ordinary leg streams, everything that already works on a
