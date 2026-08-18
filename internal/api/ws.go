@@ -66,7 +66,12 @@ func (s *Server) wsRoom(w http.ResponseWriter, r *http.Request) {
 	// and writes mixed-minus-self into the egress pipe; the transport's
 	// send loop reads from that pipe and ships PCM back to the client.
 	listenPR, listenPW := io.Pipe()
-	rm.Mixer().AddParticipant(participantID, tr.AudioReader(), listenPW)
+	p := rm.Mixer().AddParticipant(participantID, tr.AudioReader(), listenPW)
+	// Muted from the moment it joins: a room listener hears the mix and contributes
+	// nothing. Unmuted, whatever the client sent would be audible to everyone in the
+	// room — which for a room bridging a live call means audio injected into somebody's
+	// conversation by a socket that only meant to listen.
+	p.Muted.Store(true)
 
 	if err := tr.SendStructured(map[string]any{
 		"type":           "connected",
