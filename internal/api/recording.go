@@ -771,6 +771,21 @@ func (s *Server) recordRoom(w http.ResponseWriter, r *http.Request) {
 // cleanupRoomRecording stops all recording activity for a room and returns
 // the result. Returns nil if no recording was in progress.
 func (s *Server) cleanupRoomRecording(id string) (location string, mcResult *recording.MultiChannelResult, ok bool) {
+	// Claim the finalisation before any slow work. Three paths finalise a room recording
+	// — the explicit stop, the room emptying and the room being deleted — and they can
+	// arrive together. Whoever takes the recorder owns it; a second caller that got past
+	// here would publish the mix while the owner was still merging, so the merged
+	// multi-channel file existed and nothing announced it.
+	roomRecorders.Lock()
+	rec, recOK := roomRecorders.m[id]
+	if recOK {
+		delete(roomRecorders.m, id)
+	}
+	roomRecorders.Unlock()
+	if !recOK {
+		return "", nil, false
+	}
+
 	rm, rmOK := s.RoomMgr.Get(id)
 	if rmOK {
 		rm.Mixer().SetTap(nil)
@@ -781,7 +796,7 @@ func (s *Server) cleanupRoomRecording(id string) (location string, mcResult *rec
 	mc := roomMultiChannel.m[id]
 	delete(roomMultiChannel.m, id)
 	roomMultiChannel.Unlock()
-	if mc != nil && rm != nil {
+	if mc != nil && rmOK {
 		result, err := mc.stopAll(rm.Mixer())
 		if err != nil {
 			s.Log.Error("multi-channel merge failed", "room_id", id, "error", err)
@@ -805,16 +820,6 @@ func (s *Server) cleanupRoomRecording(id string) (location string, mcResult *rec
 	roomRecordPipes.Unlock()
 	if pw != nil {
 		pw.Close()
-	}
-
-	roomRecorders.Lock()
-	rec, recOK := roomRecorders.m[id]
-	if recOK {
-		delete(roomRecorders.m, id)
-	}
-	roomRecorders.Unlock()
-	if !recOK {
-		return "", nil, false
 	}
 
 	fpath := rec.Stop()
