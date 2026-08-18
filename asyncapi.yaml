@@ -6807,6 +6807,8 @@ components:
                     type: integer
                 volume:
                     type: integer
+                record:
+                    type: boolean
             required:
                 - id
                 - url

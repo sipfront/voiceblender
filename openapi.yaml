@@ -4012,6 +4012,10 @@ components:
                     default: 0
                     minimum: -8
                     maximum: 8
+                record:
+                    type: boolean
+                    description: Give this playback its own channel in the room's multi-channel recording, if one is running. A room playback is part of the room mix either way; a leg playback is heard only by that leg and is never in the mix.
+                    default: false
             required:
                 - url
                 - tone

@@ -1032,8 +1032,14 @@ Start audio playback to a leg. Fetches audio from a URL or generates a built-in 
 | `mime_type` | string | with `url` | MIME type (`audio/wav`) |
 | `repeat` | integer | no | Repeat count (0/1=once, -1=infinite) |
 | `volume` | integer | no | Volume adjustment (-8 to 8, ~3dB/step) |
+| `record` | boolean | no | Give this playback its own channel in the room's multi-channel recording (default `false`) |
 
 `url` and `tone` are mutually exclusive — provide exactly one.
+
+`record` applies when the leg is in a room that is recording multi-channel: the played
+audio is captured as a channel of its own, keyed by the `playback_id`. It is never part
+of the room mix — a leg playback is heard only by that leg, and the mix is a record of
+what the room heard.
 
 **Tone names:** Format is `{country}_{type}` or bare `{type}` (defaults to US).
 - Types: `ringback`, `busy`, `dial`, `congestion`
@@ -2595,6 +2601,12 @@ Play audio to a room. Accepts a URL or a built-in telephone tone (same tone name
 | `mime_type` | string | with `url` | MIME type (`audio/wav`) |
 | `repeat` | integer | no | Repeat count (0/1=once, -1=infinite) |
 | `volume` | integer | no | Volume adjustment (-8 to 8, ~3dB/step) |
+| `record` | boolean | no | Give this playback its own channel in the room's multi-channel recording (default `false`) |
+
+Room playback is a mixer participant, so it is part of the room mix and of any mix
+recording whether or not `record` is set. `record` adds a channel of its own to a
+multi-channel recording, keyed by the `playback_id`, rather than leaving the played
+audio present only in the mix.
 
 **Response:** `200 OK`
 

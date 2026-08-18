@@ -618,6 +618,10 @@ type PlaybackRequest struct {
 	MimeType string `json:"mime_type"`
 	Repeat   int    `json:"repeat"`
 	Volume   int    `json:"volume"`
+	// Record gives this playback its own channel in the room's multi-channel
+	// recording. Off by default: what a caller wants recorded is its decision, and a
+	// playback that was not asked to be recorded stays out of the file as before.
+	Record bool `json:"record,omitempty"`
 }
 
 var playbackRequestFields = map[string]FieldEnrichment{
@@ -626,6 +630,7 @@ var playbackRequestFields = map[string]FieldEnrichment{
 	"mime_type": {Description: "MIME type (e.g. audio/wav). Required when using url."},
 	"repeat":    {Description: "Number of times to repeat playback (url only)", Default: 0},
 	"volume":    {Description: "Volume adjustment in dB (-8 to 8)", Minimum: intPtr(-8), Maximum: intPtr(8), Default: 0},
+	"record":    {Description: "Give this playback its own channel in the room's multi-channel recording, if one is running. A room playback is part of the room mix either way; a leg playback is heard only by that leg and is never in the mix.", Default: false},
 }
 
 // VolumeRequest is the request body for PATCH /v1/legs/{id}/play/{playbackID}.

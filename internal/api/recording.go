@@ -70,26 +70,48 @@ func (mc *multiChannelState) noteParticipant(legID string) {
 func (mc *multiChannelState) startLeg(legID string, m mixerIface, dir string) {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+	mc.start(legID, m, dir)
+}
+
+// startSource begins a channel fed by the caller rather than by the mixer, and returns
+// the writer to feed it. Audio played to one leg never enters the mix — it is written
+// to that participant's own output — so there is no tap to read it from.
+//
+// Returns nil when there is nothing to record into, which the caller must treat as
+// "do not tee".
+func (mc *multiChannelState) startSource(id, dir string) *pipeWriter {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	return mc.start(id, nil, dir)
+}
+
+// start is the body of both. A nil mixer means no record tap: the source writes into
+// the returned pipe itself. Callers hold mc.mu.
+func (mc *multiChannelState) start(id string, m mixerIface, dir string) *pipeWriter {
 	if !mc.active {
-		return
+		return nil
 	}
-	if _, exists := mc.recorders[legID]; exists {
-		return
+	if _, exists := mc.recorders[id]; exists {
+		return nil
 	}
 
 	pr, pw := createPipe()
-	m.SetParticipantRecordTap(legID, pw)
+	if m != nil {
+		m.SetParticipantRecordTap(id, pw)
+	}
 
 	rec := recording.NewRecorder(mc.log)
 	fpath, err := rec.StartAt(context.Background(), pr, dir, uint32(mc.sampleRate), "")
 	if err != nil {
-		mc.log.Error("multi-channel: failed to start per-leg recording", "leg_id", legID, "error", err)
-		m.ClearParticipantRecordTap(legID)
+		mc.log.Error("multi-channel: failed to start per-leg recording", "leg_id", id, "error", err)
+		if m != nil {
+			m.ClearParticipantRecordTap(id)
+		}
 		pw.Close()
 		// participantOrder is the only place stopAll can still find this leg, so
 		// without it the room would look complete rather than short a participant.
-		mc.noteParticipant(legID)
-		return
+		mc.noteParticipant(id)
+		return nil
 	}
 
 	// If the room recording is currently paused, a late-joining participant
@@ -99,11 +121,12 @@ func (mc *multiChannelState) startLeg(legID string, m mixerIface, dir string) {
 		rec.Pause()
 	}
 
-	mc.recorders[legID] = rec
-	mc.pipes[legID] = pw
-	mc.noteParticipant(legID)
-	mc.joinOffsets[legID] = time.Since(mc.startTime)
-	mc.log.Info("multi-channel: started per-leg recording", "leg_id", legID, "file", fpath)
+	mc.recorders[id] = rec
+	mc.pipes[id] = pw
+	mc.noteParticipant(id)
+	mc.joinOffsets[id] = time.Since(mc.startTime)
+	mc.log.Info("multi-channel: started per-leg recording", "leg_id", id, "file", fpath)
+	return pw
 }
 
 // stopLeg stops recording for a single participant and stores the finalized local path.
@@ -1132,6 +1155,58 @@ func (s *Server) onStreamJoinedRoomRecording(roomID, participantID string) {
 		return
 	}
 	mc.startLeg(participantID, rm.Mixer(), s.Config.RecordingDir)
+}
+
+// onPlaybackJoinedRoomRecording gives audio played into a recorded room its own
+// channel. A playback source is a mixer participant whose incoming audio is the file,
+// so the ordinary record tap captures exactly what was played.
+func (s *Server) onPlaybackJoinedRoomRecording(roomID, playbackID string) bool {
+	roomMultiChannel.Lock()
+	mc := roomMultiChannel.m[roomID]
+	roomMultiChannel.Unlock()
+	if mc == nil {
+		return false
+	}
+
+	rm, ok := s.RoomMgr.Get(roomID)
+	if !ok {
+		return false
+	}
+	mc.startLeg(playbackID, rm.Mixer(), s.Config.RecordingDir)
+	return true
+}
+
+// onPlaybackLeavingRoomRecording finalises that capture when the playback ends, which
+// is normally long before the call does; the merge silence-pads the rest.
+func (s *Server) onPlaybackLeavingRoomRecording(roomID, playbackID string) {
+	roomMultiChannel.Lock()
+	mc := roomMultiChannel.m[roomID]
+	roomMultiChannel.Unlock()
+	if mc == nil {
+		return
+	}
+
+	rm, ok := s.RoomMgr.Get(roomID)
+	if !ok {
+		return
+	}
+	mc.stopLeg(playbackID, rm.Mixer())
+}
+
+// onLegPlaybackJoinedRoomRecording gives audio played to one leg its own channel, and
+// returns the writer the playback must tee into. Nil means nothing is recording.
+//
+// Unlike a room playback this never reaches the mix — it is written to one
+// participant's output — so the tee is the only way it can be captured, and the mix
+// stays a record of what the room heard.
+func (s *Server) onLegPlaybackJoinedRoomRecording(roomID, playbackID string) *pipeWriter {
+	roomMultiChannel.Lock()
+	mc := roomMultiChannel.m[roomID]
+	roomMultiChannel.Unlock()
+	if mc == nil {
+		return nil
+	}
+	return mc.startSource(playbackID, s.Config.RecordingDir)
 }
 
 // onStreamLeavingRoomRecording stops the per-participant capture for a stream

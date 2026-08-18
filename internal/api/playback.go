@@ -102,6 +102,16 @@ func (s *Server) doStartLegPlay(legID string, req PlaybackRequest) (*PlaybackSta
 		roomMgr:      s.RoomMgr,
 		srcRate:      playRate,
 	}
+	// A recorded room gives this its own channel. Nil unless multi-channel recording
+	// is running, and only for the room path — the frames teed are the ones the room
+	// mixer receives, already at its rate.
+	var recordTap *pipeWriter
+	if roomID := l.RoomID(); req.Record && roomID != "" {
+		recordTap = s.onLegPlaybackJoinedRoomRecording(roomID, playbackID)
+		if recordTap != nil {
+			writer.recordTap = recordTap
+		}
+	}
 
 	appID := l.AppID()
 	player.OnStart(func() {
@@ -126,6 +136,9 @@ func (s *Server) doStartLegPlay(legID string, req PlaybackRequest) (*PlaybackSta
 			err = player.PlayReaderAtRate(l.Context(), writer, toneReader, fmt.Sprintf("audio/pcm;rate=%d", playRate), playRate)
 		} else {
 			err = player.PlayAtRate(l.Context(), writer, req.URL, req.MimeType, playRate, req.Repeat)
+		}
+		if recordTap != nil {
+			s.onPlaybackLeavingRoomRecording(l.RoomID(), playbackID)
 		}
 		legPlayers.Lock()
 		delete(legPlayers.m[legID], playbackID)
@@ -221,6 +234,12 @@ func (s *Server) doStartRoomPlay(roomID string, req PlaybackRequest) (*PlaybackS
 	playbackID := "pb-" + uuid.New().String()[:8]
 	pr, pw := io.Pipe()
 	rm.Mixer().AddPlaybackSource(playbackID, pr)
+	// The mix already holds this participant; `record` asks for a channel of its own
+	// rather than a place in some party's.
+	recorded := false
+	if req.Record {
+		recorded = s.onPlaybackJoinedRoomRecording(roomID, playbackID)
+	}
 
 	player := playback.NewPlayer(s.Log)
 	player.SetVolume(req.Volume)
@@ -260,6 +279,10 @@ func (s *Server) doStartRoomPlay(roomID string, req PlaybackRequest) (*PlaybackS
 			err = player.PlayAtRate(parts[0].Context(), pw, req.URL, req.MimeType, uint32(rm.Mixer().SampleRate()), req.Repeat)
 		}
 		pw.Close()
+		// Before RemoveParticipant: the capture is finalised while the tap still exists.
+		if recorded {
+			s.onPlaybackLeavingRoomRecording(roomID, playbackID)
+		}
 		rm.Mixer().RemoveParticipant(playbackID)
 		roomPlayers.Lock()
 		delete(roomPlayers.m[roomID], playbackID)
@@ -414,6 +437,11 @@ type legPlaybackWriter struct {
 	// resamplers holds one anti-aliasing resampler per destination rate, built
 	// on first use of that rate and kept for the whole stream. See resamplerFor.
 	resamplers map[uint32]*mixer.PCMResampler
+
+	// recordTap receives a copy of what the room mixer is given, so a multi-channel
+	// recording can hold this playback as a channel of its own. Nil when the room is
+	// not recording.
+	recordTap io.Writer
 }
 
 // resamplerFor returns this stream's retained resampler from srcRate to
@@ -438,6 +466,15 @@ func (w *legPlaybackWriter) resamplerFor(dstRate uint32) *mixer.PCMResampler {
 	return rs
 }
 
+// tee copies a frame to the recording channel. A failed copy is never a failed
+// playback: the party is listening to it.
+func (w *legPlaybackWriter) tee(p []byte) {
+	if w.recordTap == nil {
+		return
+	}
+	w.recordTap.Write(p)
+}
+
 func (w *legPlaybackWriter) Write(p []byte) (int, error) {
 	roomID := w.leg.RoomID()
 	if roomID != "" {
@@ -446,9 +483,12 @@ func (w *legPlaybackWriter) Write(p []byte) (int, error) {
 			if injW != nil {
 				dstRate := uint32(rm.Mixer().SampleRate())
 				if w.srcRate == dstRate {
+					w.tee(p)
 					return injW.Write(p)
 				}
-				if _, err := injW.Write(w.resamplerFor(dstRate).ResampleBytes(p)); err != nil {
+				resampled := w.resamplerFor(dstRate).ResampleBytes(p)
+				w.tee(resampled)
+				if _, err := injW.Write(resampled); err != nil {
 					return 0, err
 				}
 				return len(p), nil
