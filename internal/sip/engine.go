@@ -43,6 +43,11 @@ type EngineConfig struct {
 	TLSKeyPath  string // private key (privkey.pem) — required when TLSBindPort > 0
 	SIPDebug    bool   // dump full SIP request/response bodies on the debug channel
 	SIPHost     string
+	// ContactUserMode selects the Contact user part: ContactUserNone (default),
+	// ContactUserFixed (ContactUser) or ContactUserLocal.
+	ContactUserMode string
+	ContactUser     string
+
 	// UseSourceSocket forces SIP responses and in-dialog requests to be
 	// routed back to the request's source socket (req.Source()) instead of
 	// the peer's Contact URI / Via sent-by. Required when peers are behind
@@ -104,6 +109,8 @@ type Engine struct {
 	bindIP            string // IPv4 advertised address (SDP c= / Contact); empty if v6-only deployment
 	bindIPV6          string // IPv6 advertised address; empty if v4-only
 	publicHost        string // hostname advertised in From/Contact/Via — equals SIPDomain when set, otherwise bindIP
+	contactUserMode   string // ContactUserNone | ContactUserFixed | ContactUserLocal
+	contactUser       string // the literal, in ContactUserFixed
 	listenIP          string // primary listen address (for ListenAndServe). May be "::" / "0.0.0.0" / literal.
 	listenIPV6        string // optional secondary IPv6 listen address (only used when both v4 and v6 literals are configured separately)
 	bindPort          int
@@ -168,11 +175,70 @@ func inviteIsTLS(req *sip.Request) bool {
 	return strings.EqualFold(via.Transport, "TLS") || strings.EqualFold(via.Transport, "WSS")
 }
 
+// Contact user-part modes. ContactUserLocal takes the local identity of the dialog:
+// the To user on a request arriving here, the From user on one we originate.
+const (
+	ContactUserNone  = "none"
+	ContactUserFixed = "fixed"
+	ContactUserLocal = "local"
+)
+
+// ContactUserModes lists the modes, for a caller validating configuration.
+func ContactUserModes() []string {
+	return []string{ContactUserNone, ContactUserFixed, ContactUserLocal}
+}
+
+// contactUserMode normalises configuration; anything unrecognised is ContactUserNone,
+// so a typo cannot silently change the identity we advertise.
+func contactUserMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case ContactUserFixed:
+		return ContactUserFixed
+	case ContactUserLocal:
+		return ContactUserLocal
+	default:
+		return ContactUserNone
+	}
+}
+
+// contactUserFor reads the local user part off a request arriving here. To and not From:
+// an in-dialog request from the peer carries our identity in To whichever direction the
+// dialog was set up in, so the Contact keeps one identity for the life of the dialog.
+func (e *Engine) contactUserFor(req *sip.Request) string {
+	switch e.contactUserMode {
+	case ContactUserFixed:
+		return e.contactUser
+	case ContactUserLocal:
+		if req == nil {
+			return ""
+		}
+		if to := req.To(); to != nil {
+			return to.Address.User
+		}
+	}
+	return ""
+}
+
 // ContactForInvite is the public form of contactForInvite, used by callers
 // outside this package that need to attach a transport-appropriate Contact
 // header to a dialog response.
 func (e *Engine) ContactForInvite(req *sip.Request) *sip.ContactHeader {
 	return e.contactForInvite(req)
+}
+
+// ContactWithUser builds a Contact for a dialog we originate, taking the local identity
+// from the From user chosen for it.
+func (e *Engine) ContactWithUser(localUser string) *sip.ContactHeader {
+	user := ""
+	switch e.contactUserMode {
+	case ContactUserFixed:
+		user = e.contactUser
+	case ContactUserLocal:
+		user = localUser
+	}
+	return &sip.ContactHeader{Address: sip.Uri{
+		Scheme: "sip", User: user, Host: e.publicHost, Port: e.bindPort,
+	}}
 }
 
 // contactForInvite returns a Contact that matches the transport on which
@@ -182,10 +248,15 @@ func (e *Engine) ContactForInvite(req *sip.Request) *sip.ContactHeader {
 // that address so the peer's ACK / BYE routes back to us.
 func (e *Engine) contactForInvite(req *sip.Request) *sip.ContactHeader {
 	host := e.contactHostForRequest(req)
+	user := e.contactUserFor(req)
 	if inviteIsTLS(req) && e.tlsPort != 0 {
-		return &sip.ContactHeader{Address: sip.Uri{Scheme: "sips", Host: host, Port: e.tlsPort}}
+		return &sip.ContactHeader{Address: sip.Uri{
+			Scheme: "sips", User: user, Host: host, Port: e.tlsPort,
+		}}
 	}
-	return &sip.ContactHeader{Address: sip.Uri{Scheme: "sip", Host: host, Port: e.bindPort}}
+	return &sip.ContactHeader{Address: sip.Uri{
+		Scheme: "sip", User: user, Host: host, Port: e.bindPort,
+	}}
 }
 
 // contactHostForRequest picks the Contact host for an inbound request based
@@ -460,6 +531,8 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		bindIP:            advertiseIP,
 		bindIPV6:          advertiseIPV6,
 		publicHost:        publicHost,
+		contactUserMode:   contactUserMode(cfg.ContactUserMode),
+		contactUser:       cfg.ContactUser,
 		listenIP:          listenIP,
 		listenIPV6:        listenIPV6,
 		bindPort:          cfg.BindPort,
@@ -588,6 +661,12 @@ func (e *Engine) handleReInvite(req *sip.Request, tx sip.ServerTransaction) {
 	res := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", answerSDP)
 	res.AppendHeader(e.ServerHeader())
 	res.AppendHeader(e.AllowHeader())
+	// RFC 3261 §12.2.2: the 2xx to a target-refresh request must carry a Contact, or a
+	// strict peer has no target to refresh to and discards the response. This path
+	// answers the transaction directly, so neither RespondInviteSDP nor sipgo's
+	// WriteResponse default applies. Record-Route needs nothing —
+	// NewResponseFromRequest already copies it from the request.
+	res.AppendHeader(e.contactForInvite(req))
 	if len(answerSDP) > 0 {
 		res.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	}
@@ -602,6 +681,7 @@ func (e *Engine) handleReInvite(req *sip.Request, tx sip.ServerTransaction) {
 			res.AppendHeader(sip.NewHeader("Session-Expires", FormatSessionExpires(interval, refresher)))
 		}
 	}
+	e.logSIPMessage("outbound", res)
 	if err := e.respondMaybeFromSource(tx, req, res); err != nil {
 		e.log.Error("re-INVITE: respond failed", "error", err)
 		return
@@ -683,6 +763,9 @@ func (e *Engine) handleUpdate(req *sip.Request, tx sip.ServerTransaction) {
 	res := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", answerSDP)
 	res.AppendHeader(e.ServerHeader())
 	res.AppendHeader(e.AllowHeader())
+	// RFC 3311 §5.1 allows an UPDATE to refresh the remote target, so the 2xx carries
+	// the Contact it would be refreshed to.
+	res.AppendHeader(e.contactForInvite(req))
 	if len(answerSDP) > 0 {
 		res.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 	}
@@ -697,6 +780,7 @@ func (e *Engine) handleUpdate(req *sip.Request, tx sip.ServerTransaction) {
 			res.AppendHeader(sip.NewHeader("Session-Expires", FormatSessionExpires(interval, refresher)))
 		}
 	}
+	e.logSIPMessage("outbound", res)
 	if err := e.respondMaybeFromSource(tx, req, res); err != nil {
 		e.log.Error("UPDATE: respond failed", "error", err)
 		return
@@ -1019,6 +1103,12 @@ func (e *Engine) DialogRespond(d *sipgo.DialogServerSession, statusCode int, rea
 		res.AppendHeader(h)
 	}
 	res.AppendHeader(e.AllowHeader())
+	// Ours rather than the DialogUA default, which sipgo would otherwise fill in: the
+	// default carries no user part, so a dialog answered here advertised a different
+	// Contact from one answered by RespondInviteSDP or by handleReInvite.
+	if res.Contact() == nil {
+		res.AppendHeader(e.contactForInvite(d.InviteRequest))
+	}
 	e.pinDestinationToSource(d.InviteRequest, res)
 	return d.WriteResponse(res)
 }
@@ -1425,6 +1515,16 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 			}
 			req.SetDestination(t.Socket)
 		}
+	}
+
+	// sipgo supplies the DialogUA default only when the request carries no Contact, so
+	// setting one here wins and omitting it leaves the default behaviour untouched.
+	if e.contactUserMode != ContactUserNone && req.Contact() == nil {
+		localUser := ""
+		if f := req.From(); f != nil {
+			localUser = f.Address.User
+		}
+		req.AppendHeader(e.ContactWithUser(localUser))
 	}
 
 	e.logSIPMessage("outbound", req)

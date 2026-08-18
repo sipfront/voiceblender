@@ -133,6 +133,8 @@ func main() {
 		SIPDebug:          cfg.SIPDebug,
 		SIPHost:           cfg.SIPHost,
 		UseSourceSocket:   cfg.SIPUseSourceSocket,
+		ContactUserMode:   cfg.SIPContactUserMode,
+		ContactUser:       cfg.SIPContactUser,
 		TCPEnabled:        cfg.SIPTCPEnabled,
 		Codecs:            cfg.Codecs,
 		AMRWBMode:         cfg.AMRWBMode,

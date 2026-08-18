@@ -82,6 +82,12 @@ type Config struct {
 	SIPTCPEnabled            bool // listen for SIP over TCP alongside UDP; needed for inbound SIPREC, whose INVITEs are too large for UDP
 	SIPUseSourceSocket       bool // when true, send SIP responses and in-dialog requests to the request's source socket instead of Contact / Via sent-by; needed when peers advertise unroutable addresses (e.g. behind NAT)
 
+	// Contact user part: "none" (default), "fixed" (SIPContactUser) or "local" (the To
+	// user of a request arriving here, the From user of one we originate). Some peers
+	// synthesise a user part of their own when the Contact has none.
+	SIPContactUserMode string
+	SIPContactUser     string
+
 	SIPRegistrationDefaultExpiresSeconds int
 	SIPRegistrationMaxExpiresSeconds     int
 	SIPRegistrationSweepIntervalMs       int
@@ -208,6 +214,8 @@ func Load() Config {
 		SIPAutoRinging:            os.Getenv("SIP_AUTO_RINGING") == "true",
 		SIPTCPEnabled:             envBool("SIP_TCP_ENABLED", false),
 		SIPUseSourceSocket:        os.Getenv("SIP_USE_SOURCE_SOCKET") == "true",
+		SIPContactUserMode:        envOr("SIP_CONTACT_USER_MODE", "none"),
+		SIPContactUser:            os.Getenv("SIP_CONTACT_USER"),
 
 		SIPRegistrationDefaultExpiresSeconds: envInt("SIP_REGISTRATION_DEFAULT_EXPIRES_SECONDS", 3600),
 		SIPRegistrationMaxExpiresSeconds:     envInt("SIP_REGISTRATION_MAX_EXPIRES_SECONDS", 7200),
