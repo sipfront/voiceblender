@@ -61,6 +61,12 @@ info:
         - name: SIP_USE_SOURCE_SOCKET
           default: "false"
           description: When true, route SIP responses and in-dialog requests (BYE, re-INVITE, UPDATE, INFO, NOTIFY, REFER) back to the request's source UDP socket instead of the peer's Contact / Via sent-by. Enable when peers advertise unroutable addresses (e.g. private IPs in Contact from behind NAT).
+        - name: SIP_CONTACT_USER_MODE
+          default: none
+          description: 'User part of the Contact advertised in SIP requests and responses. none: <sip:host:port>, no user part. fixed: the literal in SIP_CONTACT_USER, on every dialog. local: this side''s own identity, meaning the To user of a request arriving here and the From user of one we originate. Set this when a peer mishandles a userless Contact, as some synthesise a user part of their own and then route or match on it.'
+        - name: SIP_CONTACT_USER
+          default: ""
+          description: The literal user part used when SIP_CONTACT_USER_MODE is fixed.
         - name: SIP_OUTBOUND_PROXY
           default: ""
           description: 'Default next-hop SIP proxy for outbound REGISTERs and INVITEs, attached as a loose Route header (`Route: <sip:proxy;lr>`) with the Request-URI left unchanged. Overridden per-trunk by `sip_register.outbound_proxy` on POST /v1/sip/trunks and per-call by `outbound_proxy` on POST /v1/legs. Not applied when the dialed URI resolves to an AOR registered to this server, nor to SIPREC SRC or WhatsApp legs. Digest authentication still targets the registrar, not the proxy. A malformed value fails startup. Note that when several trunks share one proxy, the `trunk_id` tag on inbound legs becomes ambiguous — it is informational only.'

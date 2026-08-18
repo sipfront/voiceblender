@@ -207,6 +207,9 @@ go test -tags integration -v -timeout 60s -run TestGCSRecording ./tests/integrat
 | Test | Description |
 |------|-------------|
 | `TestOutboundInbound_Connect` | Basic SIP call: A dials B, B answers, both connect |
+| `TestSIPReInvite_OKCarriesContact` | The 2xx to a re-INVITE carries a `Contact` (RFC 3261 §12.2.2). Without it a strict peer discards the response, retransmits to timer B and tears down an established call. |
+| `TestSIPReInvite_OKEchoesRecordRouteOnlyWhenAsked` | A `Record-Route` on the re-INVITE comes back on the response and one that was not sent is not invented. |
+| `TestSIPContactUser_LocalMode` / `TestSIPContactUser_NoneByDefault` | `SIP_CONTACT_USER_MODE`: the advertised `Contact` user part, and that it stays the same identity for the life of a dialog. Unit tests in `internal/sip/contact_test.go` cover the three modes. |
 | `TestUseSourceSocket_RoundTripCall` | Smoke test for `SIP_USE_SOURCE_SOCKET=true`: end-to-end call setup, BYE, and disconnect events still complete with the flag enabled. Unit tests in `internal/sip/engine_test.go` (`TestEngine_PinDestinationToSource`) cover the destination-pinning logic itself. |
 | `TestCall_IPv6Loopback` | Same as above, but both instances are bound to `[::1]` (IPv6 loopback). Skipped when the host has no IPv6 loopback. |
 | `TestCall_DualStackInterop_V4Caller` | A dual-stack callee answers an IPv4-only caller with `IN IP4` SDP — exercises the family-from-offer rule. |
