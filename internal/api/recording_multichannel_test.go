@@ -219,3 +219,88 @@ func TestStopRoomRecordingIfEmpty_PublishesOmittedLegs(t *testing.T) {
 		t.Errorf("OmittedLegs = %v, want [bad] — the auto-stop reported a partial recording as complete", names)
 	}
 }
+
+// gatedMixer holds a leg inside stopLeg, at the point where the leg has already
+// been taken out of the recorder map but its file has not been published yet.
+// ClearParticipantRecordTap is the first thing stopLeg does after it drops the
+// lock, which makes it the seam for the interleaving this test is about.
+type gatedMixer struct {
+	leg     string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g gatedMixer) SetParticipantRecordTap(string, io.Writer) {}
+
+func (g gatedMixer) ClearParticipantRecordTap(legID string) {
+	if legID != g.leg {
+		return
+	}
+	close(g.entered)
+	<-g.release
+}
+
+// TestMultiChannelStopAll_WaitsForALegAlreadyStopping is the bridged-call case.
+//
+// stopLeg removes the leg from the recorder map under the lock, then finalizes
+// outside it and publishes into files only at the end. stopAll snapshots the
+// recorder map and then reads files, so a leg stopping concurrently was in
+// neither: not waited for, not merged, and reported as a capture that had been
+// discarded when it had not. Both legs of a bridged call get their BYE in the
+// same instant — one leaves the room while the other's departure stops the whole
+// recording — so the window is not a rare one, and every application-server call
+// came out of it with a single-channel "multi-channel" file.
+func TestMultiChannelStopAll_WaitsForALegAlreadyStopping(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	mc := &multiChannelState{
+		active:       true,
+		startTime:    time.Now().Add(-time.Second),
+		sampleRate:   8000,
+		dir:          dir,
+		recorders:    map[string]*recording.Recorder{},
+		pipes:        map[string]*pipeWriter{},
+		files:        map[string]string{},
+		joinOffsets:  map[string]time.Duration{},
+		leaveOffsets: map[string]time.Duration{},
+		log:          slog.Default(),
+	}
+
+	// Two healthy legs, both already at EOF: what is being tested is the
+	// bookkeeping around their stop, not the capture itself.
+	for _, leg := range []string{"a", "b"} {
+		rec := recording.NewRecorder(slog.Default())
+		if _, err := rec.StartAt(ctx, bytes.NewReader(make([]byte, 16000)), dir, 8000, ""); err != nil {
+			t.Fatalf("start leg %s: %v", leg, err)
+		}
+		rec.Wait()
+		if !rec.Published() {
+			t.Fatalf("precondition: leg %s did not publish, so this test proves nothing", leg)
+		}
+		mc.recorders[leg] = rec
+	}
+	mc.participantOrder = []string{"a", "b"}
+
+	gate := gatedMixer{leg: "b", entered: make(chan struct{}), release: make(chan struct{})}
+	go mc.stopLeg("b", gate)
+	<-gate.entered // "b" is out of the recorder map and not yet in files
+
+	// Held long enough that a stopAll which does not wait cannot see b's file by
+	// luck. A stopAll which does wait releases at once and takes no longer than
+	// this either way.
+	time.AfterFunc(200*time.Millisecond, func() { close(gate.release) })
+
+	res, err := mc.stopAll(gate)
+	if err != nil {
+		t.Fatalf("stopAll: %v", err)
+	}
+	if len(res.OmittedLegs) != 0 {
+		t.Errorf("a leg that was mid-stop was reported lost: %v", res.OmittedLegs)
+	}
+	for _, leg := range []string{"a", "b"} {
+		if _, ok := res.Channels[leg]; !ok {
+			t.Errorf("leg %s is missing from the merge; channels = %v", leg, res.Channels)
+		}
+	}
+}

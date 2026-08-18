@@ -44,6 +44,11 @@ type multiChannelState struct {
 	recorders  map[string]*recording.Recorder // legID → recorder
 	pipes      map[string]*pipeWriter         // legID → pipe writer (to close on stop)
 	files      map[string]string              // legID → local WAV path (finalized)
+	// stopping holds a channel per leg whose stop is in flight, closed when that
+	// leg has published or lost its file. stopLeg takes a leg out of recorders
+	// before it finalizes, so without this a stopAll running at the same time
+	// finds the leg in neither map and merges without it — see stopAll.
+	stopping map[string]chan struct{}
 	// Channel assignment — preserves order for deterministic channel mapping.
 	participantOrder []string
 	// Timing — join/leave offsets relative to startTime.
@@ -113,7 +118,21 @@ func (mc *multiChannelState) stopLeg(legID string, m mixerIface) {
 	delete(mc.recorders, legID)
 	delete(mc.pipes, legID)
 	mc.leaveOffsets[legID] = time.Since(mc.startTime)
+	// Announced in the same critical section that removes the recorder, so this
+	// leg is never invisible to a concurrent stopAll: it is in recorders, or it is
+	// in stopping, or its file is decided.
+	done := make(chan struct{})
+	if mc.stopping == nil {
+		mc.stopping = make(map[string]chan struct{})
+	}
+	mc.stopping[legID] = done
 	mc.mu.Unlock()
+	defer func() {
+		mc.mu.Lock()
+		delete(mc.stopping, legID)
+		mc.mu.Unlock()
+		close(done)
+	}()
 
 	m.ClearParticipantRecordTap(legID)
 	if pw != nil {
@@ -154,6 +173,27 @@ func (mc *multiChannelState) stopAll(m mixerIface) (*recording.MultiChannelResul
 	// Stop any still-recording participants.
 	for _, id := range legIDs {
 		mc.stopLeg(id, m)
+	}
+
+	// And wait for the ones somebody else is already stopping. A leg that left the
+	// room on its own is out of recorders before its file exists, so it is not in
+	// the snapshot above and its capture is still being finalized — merging here
+	// would drop it and report it as discarded. Both legs of a bridged call hang up
+	// together, which is exactly this: one leaving empties the room and stops the
+	// recording while the other is still on its way out.
+	for {
+		mc.mu.Lock()
+		wait := make([]chan struct{}, 0, len(mc.stopping))
+		for _, done := range mc.stopping {
+			wait = append(wait, done)
+		}
+		mc.mu.Unlock()
+		if len(wait) == 0 {
+			break
+		}
+		for _, done := range wait {
+			<-done
+		}
 	}
 
 	mc.mu.Lock()
