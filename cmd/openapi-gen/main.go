@@ -410,6 +410,7 @@ func configVars() *seq {
 		{Name: "SIP_CODECS", Default: "PCMU,PCMA", Description: "Comma-separated, preference-ordered list of codecs the SIP engine offers on outbound INVITEs and accepts on inbound INVITEs. Recognized names (case-insensitive): PCMU, PCMA, G722, opus, AMR-WB, AMR-NB (bare token AMR resolves to AMR-NB per RFC 4867 §8.1). Unknown names and duplicates are dropped silently."},
 		{Name: "SIP_AUTO_RINGING", Default: "false", Description: "When true, the server sends 180 Ringing automatically after 100 Trying. Default sends only 100 Trying; the API caller drives ringing via /ring, /early-media, or /answer."},
 		{Name: "SIP_USE_SOURCE_SOCKET", Default: "false", Description: "When true, route SIP responses and in-dialog requests (BYE, re-INVITE, UPDATE, INFO, NOTIFY, REFER) back to the request's source UDP socket instead of the peer's Contact / Via sent-by. Enable when peers advertise unroutable addresses (e.g. private IPs in Contact from behind NAT)."},
+		{Name: "SIP_OUTBOUND_PROXY", Default: "", Description: "Default next-hop SIP proxy for outbound REGISTERs and INVITEs, attached as a loose Route header (`Route: <sip:proxy;lr>`) with the Request-URI left unchanged. Overridden per-trunk by `sip_register.outbound_proxy` on POST /v1/sip/trunks and per-call by `outbound_proxy` on POST /v1/legs. Not applied when the dialed URI resolves to an AOR registered to this server, nor to SIPREC SRC or WhatsApp legs. Digest authentication still targets the registrar, not the proxy. A malformed value fails startup. Note that when several trunks share one proxy, the `trunk_id` tag on inbound legs becomes ambiguous — it is informational only."},
 		{Name: "SIP_REGISTRATION_DEFAULT_EXPIRES_SECONDS", Default: "3600", Description: "Expiry used when an inbound REGISTER carries no Expires value."},
 		{Name: "SIP_REGISTRATION_MAX_EXPIRES_SECONDS", Default: "7200", Description: "Upper clamp on the granted REGISTER expiry. Requests above this value are honored at this maximum."},
 		{Name: "SIP_REGISTRATION_SWEEP_INTERVAL_MS", Default: "1000", Description: "Sweeper period (ms) for evicting expired AOR bindings."},
@@ -871,15 +872,18 @@ func main() {
 	doc.set("servers", servers)
 
 	// Tags.
-	tags := newSeq().
-		add(newMap().set("name", "Legs").set("description", "Voice call legs (SIP or WebRTC)")).
-		add(newMap().set("name", "Rooms").set("description", "Multi-party audio conference rooms")).
-		add(newMap().set("name", "WebRTC").set("description", "WebRTC peer connection establishment")).
-		add(newMap().set("name", "Observability").set("description", "Metrics and health endpoints"))
-	doc.set("tags", tags)
+	doc.set("tags", buildTags(pathsNode))
 
 	// Paths.
 	doc.set("paths", pathsNode)
+
+	// Webhooks are built before the components block: a webhook payload that
+	// carries a named struct (OfferedCodec, SIPRECStream, STTWord,
+	// ParticipantInfo, …) emits a $ref and registers that type in
+	// schemaRegistry, and buildSchemas snapshots the registry. Building them
+	// the other way round leaves those refs pointing at schemas that were
+	// registered too late to be emitted. The document key order is unchanged.
+	webhooks := buildWebhooks()
 
 	// Components.
 	components := newMap()
@@ -889,7 +893,7 @@ func main() {
 	doc.set("components", components)
 
 	// Webhooks.
-	doc.set("x-webhooks", buildWebhooks())
+	doc.set("x-webhooks", webhooks)
 
 	// Write output.
 	out, err := yaml.Marshal(&doc.node)
@@ -912,6 +916,84 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("Generated %s (%d bytes)\n", outPath, len(out))
+}
+
+// tagDescriptions supplies the prose for each root-level tag. Every tag used by
+// an operation must have an entry here — buildTags fails the generation
+// otherwise, so a new route group cannot silently ship undeclared.
+func tagDescriptions() map[string]string {
+	return map[string]string{
+		"Legs":              "Voice call legs (SIP or WebRTC)",
+		"WebRTC":            "WebRTC peer connection establishment",
+		"Rooms":             "Multi-party audio conference rooms, including audio bridges between room mixers",
+		"SIP Registrations": "Inbound SIP AOR registrations and parked REGISTER attempts",
+		"SIP Trunks":        "Outbound SIP trunks (REGISTER or static peering)",
+		"Events":            "Real-time event stream and command channel (VSI)",
+		"Observability":     "Metrics and health endpoints",
+	}
+}
+
+// buildTags derives the root-level tags list from the tags the operations
+// actually carry, in first-appearance order, so it can never drift from the
+// paths block the way a hand-maintained list does.
+func buildTags(paths *omap) *seq {
+	descs := tagDescriptions()
+
+	tags := newSeq()
+	seen := map[string]bool{}
+	var missing []string
+	for _, name := range collectOperationTags(paths) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		desc, ok := descs[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		tags.add(newMap().set("name", name).set("description", desc))
+	}
+
+	if len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "tag %q used by an operation but has no entry in tagDescriptions()\n",
+			strings.Join(missing, `", "`))
+		os.Exit(1)
+	}
+
+	return tags
+}
+
+// collectOperationTags walks the built paths node and returns every tag named
+// by an operation, in document order (duplicates included).
+func collectOperationTags(paths *omap) []string {
+	var out []string
+	for i := 0; i+1 < len(paths.node.Content); i += 2 {
+		pathItem := paths.node.Content[i+1]
+		for j := 0; j+1 < len(pathItem.Content); j += 2 {
+			if !isMethodKey(pathItem.Content[j].Value) {
+				continue
+			}
+			op := pathItem.Content[j+1]
+			for k := 0; k+1 < len(op.Content); k += 2 {
+				if op.Content[k].Value != "tags" {
+					continue
+				}
+				for _, t := range op.Content[k+1].Content {
+					out = append(out, t.Value)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func isMethodKey(key string) bool {
+	switch key {
+	case "get", "put", "post", "delete", "options", "head", "patch", "trace":
+		return true
+	}
+	return false
 }
 
 func buildParameters() *omap {
