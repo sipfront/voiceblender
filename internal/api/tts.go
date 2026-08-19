@@ -27,6 +27,9 @@ type legTTSTarget struct {
 	provider     tts.Provider
 	apiKey       string
 	directWriter io.Writer
+	// record is carried here rather than read again at play time, so a preflighted
+	// utterance is recorded as its own request asked and not as the commit's.
+	record bool
 }
 
 func (s *Server) validateLegTTS(legID string, req TTSRequest) (*legTTSTarget, error) {
@@ -55,7 +58,8 @@ func (s *Server) validateLegTTS(legID string, req TTSRequest) (*legTTSTarget, er
 	if directWriter == nil {
 		return nil, newAPIError(http.StatusConflict, "leg has no audio writer")
 	}
-	return &legTTSTarget{leg: l, provider: provider, apiKey: apiKey, directWriter: directWriter}, nil
+	return &legTTSTarget{leg: l, provider: provider, apiKey: apiKey,
+		directWriter: directWriter, record: req.Record}, nil
 }
 
 // registerLegTTSPlayer allocates a TTS id and registers its player, so that
@@ -127,7 +131,20 @@ func (s *Server) playLegTTSAudio(t *legTTSTarget, ttsID string, player *playback
 		roomMgr:      s.RoomMgr,
 		srcRate:      ttsRate,
 	}
+	// A recorded room gives this its own channel, teed as a leg playback is: the
+	// audio goes to one party's output and never enters the mix. Nil unless
+	// multi-channel recording is running.
+	var recordTap *pipeWriter
+	roomID := l.RoomID()
+	if t.record && roomID != "" {
+		if recordTap = s.onLegPlaybackJoinedRoomRecording(roomID, ttsID); recordTap != nil {
+			writer.recordTap = recordTap
+		}
+	}
 	playErr := player.PlayReaderAtRate(l.Context(), writer, audio, mimeType, ttsRate)
+	if recordTap != nil {
+		s.onPlaybackLeavingRoomRecording(l.RoomID(), ttsID)
+	}
 
 	deregisterLegPlayer(legID, ttsID)
 
@@ -235,6 +252,12 @@ func (s *Server) doRoomTTS(roomID string, req TTSRequest) (*TTSStartResult, erro
 
 	pr, pw := io.Pipe()
 	rm.Mixer().AddPlaybackSource(ttsID, pr)
+	// The mix already holds this participant; `record` asks for a channel of its own
+	// rather than a place in some party's.
+	recorded := false
+	if req.Record {
+		recorded = s.onPlaybackJoinedRoomRecording(id, ttsID)
+	}
 
 	player := playback.NewPlayer(s.Log)
 	player.SetVolume(req.Volume)
@@ -254,6 +277,9 @@ func (s *Server) doRoomTTS(roomID string, req TTSRequest) (*TTSStartResult, erro
 		})
 		if err != nil {
 			pw.Close()
+			if recorded {
+				s.onPlaybackLeavingRoomRecording(id, ttsID)
+			}
 			rm.Mixer().RemoveParticipant(ttsID)
 			roomPlayers.Lock()
 			delete(roomPlayers.m[id], ttsID)
@@ -280,6 +306,10 @@ func (s *Server) doRoomTTS(roomID string, req TTSRequest) (*TTSStartResult, erro
 
 		playErr := player.PlayReaderAtRate(parts[0].Context(), pw, result.Audio, result.MimeType, uint32(rm.Mixer().SampleRate()))
 		pw.Close()
+		// Before RemoveParticipant: the capture is finalised while the tap still exists.
+		if recorded {
+			s.onPlaybackLeavingRoomRecording(id, ttsID)
+		}
 		rm.Mixer().RemoveParticipant(ttsID)
 
 		roomPlayers.Lock()

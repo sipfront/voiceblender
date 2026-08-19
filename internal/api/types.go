@@ -670,6 +670,9 @@ type TTSRequest struct {
 	Volume   int    `json:"volume"`
 	Provider string `json:"provider,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
+	// Record gives this utterance its own channel in the room's multi-channel
+	// recording, as PlaybackRequest.Record does for a file.
+	Record bool `json:"record,omitempty"`
 }
 
 var ttsRequestFields = map[string]FieldEnrichment{
@@ -681,6 +684,7 @@ var ttsRequestFields = map[string]FieldEnrichment{
 	"volume":   {Description: "Volume adjustment in dB (-8 to 8)", Minimum: intPtr(-8), Maximum: intPtr(8), Default: 0},
 	"provider": {Description: `TTS provider: "elevenlabs" (default), "aws", "google", or "deepgram"`, Enum: []string{"elevenlabs", "aws", "google", "deepgram"}},
 	"api_key":  {Description: "ElevenLabs: API key override (falls back to ELEVENLABS_API_KEY env var). AWS: optional ACCESS_KEY:SECRET_KEY override (falls back to default AWS credential chain). Google Cloud: optional API key override (falls back to Application Default Credentials). Deepgram: API key override (falls back to DEEPGRAM_API_KEY env var)."},
+	"record":   {Description: "Give this utterance its own channel in the room's multi-channel recording, if one is running. A room utterance is part of the room mix either way; a leg utterance is heard only by that leg and is never in the mix.", Default: false},
 }
 
 // STTRequest is the request body for POST /v1/legs/{id}/stt and POST /v1/rooms/{id}/stt.

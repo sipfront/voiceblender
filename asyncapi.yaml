@@ -7054,6 +7054,8 @@ components:
                     type: string
                 api_key:
                     type: string
+                record:
+                    type: boolean
             required:
                 - id
                 - text

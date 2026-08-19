@@ -1162,6 +1162,13 @@ Transient upstream failures (429, 500/502/503/504, transport timeouts) are retri
 | `prompt` | string | no | Style/tone instruction for promptable voice models (Google Gemini TTS only). E.g. `"Read aloud in a warm, welcoming tone."` |
 | `volume` | integer | no | Volume adjustment in dB (`-8` to `8`, default `0`) |
 | `api_key` | string | no | ElevenLabs: API key override (falls back to `ELEVENLABS_API_KEY` env var). AWS: optional `ACCESS_KEY:SECRET_KEY` override (falls back to default AWS credential chain). Google Cloud: optional API key override (falls back to Application Default Credentials). Deepgram: API key override (falls back to `DEEPGRAM_API_KEY` env var). Azure: subscription key override (falls back to `AZURE_SPEECH_KEY` env var). |
+| `record` | boolean | no | Give this utterance its own channel in the room's multi-channel recording (default `false`) |
+
+`record` applies when the leg is in a room that is recording multi-channel: the
+synthesized audio is captured as a channel of its own, keyed by the `tts_id`. It is
+never part of the room mix — an utterance played to one leg is heard only by that leg,
+and the mix is a record of what the room heard. A preflighted utterance carries the
+flag it was staged with, so committing it records exactly what the preflight asked for.
 
 **Providers:**
 - `elevenlabs` — ElevenLabs streaming TTS API (default). Requires an API key.
@@ -2685,6 +2692,12 @@ Transient upstream failures (429, 500/502/503/504, transport timeouts) are retri
 | `prompt` | string | no | Style/tone instruction for promptable voice models (Google Gemini TTS only). |
 | `volume` | integer | no | Volume adjustment in dB (`-8` to `8`, default `0`) |
 | `api_key` | string | no | ElevenLabs: API key override (falls back to `ELEVENLABS_API_KEY` env var). AWS: optional `ACCESS_KEY:SECRET_KEY` override (falls back to default AWS credential chain). Google Cloud: optional API key override (falls back to Application Default Credentials). Deepgram: API key override (falls back to `DEEPGRAM_API_KEY` env var). Azure: subscription key override (falls back to `AZURE_SPEECH_KEY` env var). |
+| `record` | boolean | no | Give this utterance its own channel in the room's multi-channel recording (default `false`) |
+
+Room TTS is a mixer participant, so it is part of the room mix and of any mix recording
+whether or not `record` is set. `record` adds a channel of its own to a multi-channel
+recording, keyed by the `tts_id`, rather than leaving the synthesized audio present only
+in the mix.
 
 **Response:** `200 OK`
 
